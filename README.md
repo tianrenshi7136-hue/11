@@ -79,3 +79,9 @@ Blinding采用工程师指定的`Structural capacity AA section.xlsx`中Blinding
 返回“指定截面验算”点击生成，同一本XLS与PDF增加Strut & Wailing Summary、各构件验算、Connection Checks和Blinding Concrete。取消独立参数总结页；内力汇总采用原Strut&Wailing Summary的分区表格，焊缝采用原Connection check的展开式计算。汇总、构件计算及焊缝之间保留Excel公式链接，修改输入可以重算；正式重新出成果应从软件生成新版本，以保持result.json与文件一致。任何构件、焊缝或Blinding不通过均停止本次完整成果生成。
 
 本机已登记钢板桩及Blinding源文件指纹。更换或修改模板后需重新审查登记；请勿直接删除指纹检查。验证脚本：`python -m tools.verify_supports_excel`、`python -m tools.verify_supports_failures`，须具备已登记的本地模板和桌面Excel。验证样例位于outputs/supports-validation，明确标注Software Validation Sample。
+
+## 本地 Git 工作副本
+
+本项目使用GitHub仓库`tianrenshi7136-hue/11`，开发分支为`feat/template-workbench`。当前项目文件夹可直接作为本地Git工作副本；工程模板、数据库、生成成果、凭据和临时诊断脚本由`.gitignore`排除，代码换行规则由`.gitattributes`统一。
+
+在项目目录运行`git status`查看变更，运行`git log -5 --oneline`查看版本。提交前检查`git diff --cached --name-only`，确认不包含工程资料。GitHub连接的授权与命令行Git登录分别管理；命令行推送需要该电脑可用的GitHub凭据。

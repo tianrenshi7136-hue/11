@@ -12,6 +12,7 @@ except ImportError:
     QApplication = None
 
 from test_core import valid_project
+from test_sheetpile import request as steel_request
 
 
 @unittest.skipIf(QApplication is None, "PySide6 not installed")
@@ -47,4 +48,21 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(window.table.item(0, 7).text(), "")
             with self.assertRaises(ValueError):
                 window.collect()
+            window.close()
+
+    def test_sheetpile_roundtrip_and_edits_expire_results(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'steel.db')
+            p = valid_project()
+            p['sheetpile'] = steel_request()
+            window.load_form(p)
+            self.assertEqual(window.collect()['sheetpile'], p['sheetpile'])
+            window.save()
+            self.assertEqual(window.store.load(p['id'], 1)['sheetpile'], p['sheetpile'])
+            window.steel_result.setPlainText('generated')
+            window.steel_fields['yield_strength_mpa'].setText('355')
+            self.assertIn('已过期', window.steel_result.toPlainText())
+            window.load_steel({})
+            window.add_steel_case()
+            self.assertIsNone(window.collect_steel()['cases'][0]['v_kn_per_m'])
             window.close()

@@ -15,7 +15,7 @@ def sha256(path):
 
 
 def inspect_excel(path):
-    from openpyxl import load_workbook
+    from .ooxml import audit
     path = Path(path)
     if path.suffix.lower() not in (".xlsx", ".xlsm"):
         raise ValueError("当前检查器支持xlsx/xlsm；xls需单独接入Excel检查")
@@ -23,15 +23,12 @@ def inspect_excel(path):
         parts = archive.namelist()
         external_links = [p for p in parts if p.startswith("xl/externalLinks/") and p.endswith(".xml")]
         macros = "xl/vbaProject.bin" in parts
-    book = load_workbook(path, data_only=False, read_only=False, keep_links=True)
-    try:
-        sheets = []
-        for sheet in book:
-            formulas = [{"cell": c.coordinate, "formula": str(c.value)} for row in sheet for c in row if c.data_type == "f"]
-            sheets.append({"name": sheet.title, "rows": sheet.max_row, "columns": sheet.max_column, "state": sheet.sheet_state, "formula_count": len(formulas), "formula_sample": formulas[:30], "print_area": str(sheet.print_area or ""), "merged_cells": [str(r) for r in sheet.merged_cells.ranges]})
-        return {"path": str(path.resolve()), "sha256": sha256(path), "macros": macros, "external_links": external_links, "defined_names": {k: str(v.attr_text) for k, v in book.defined_names.items()}, "sheets": sheets, "status": "仅检查结构，未计算、未审核"}
-    finally:
-        book.close()
+    report = audit(path)
+    sheets = []
+    for sheet in report["sheets"]:
+        formulas = [{"cell": c["cell"], "formula": c["formula"]} for c in sheet["cells"] if c["formula"] is not None]
+        sheets.append({"name": sheet["name"], "state": sheet["state"], "formula_count": sheet["formula_count"], "formula_sample": formulas[:30], "cached_error_count": len(sheet["cached_errors"]), "cached_error_sample": sheet["cached_errors"][:10], "broken_formula_count": len(sheet["broken_formulas"]), "broken_formula_sample": sheet["broken_formulas"][:10], "external_formula_count": len(sheet["external_formulas"]), "print_definitions": [n for n in report["names"] if n["name"] == "_xlnm.Print_Area" and n["scope"] == str(len(sheets))]})
+    return {"path": str(path.resolve()), "sha256": sha256(path), "macros": macros, "external_link_count": len(external_links), "defined_name_count": len(report["names"]), "broken_name_count": sum("#REF!" in (n["value"] or "") for n in report["names"]), "sheets": sheets, "status": "仅检查结构与保存时缓存；未重算、未审核"}
 
 
 def check_manifest(path):

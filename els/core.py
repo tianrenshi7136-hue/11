@@ -16,6 +16,7 @@ def new_project():
         "length_m": 0.0, "width_m": 0.0, "depth_m": 0.0,
         "embedment_m": 0.0, "analysis_reference": "", "site_notes": "",
         "external_checks": "", "members": [], "template_manifest": "",
+        "sheetpile": {},
     }
 
 
@@ -39,6 +40,12 @@ def validate(project):
     if not isinstance(project.get("analysis_reference"), str) or not project["analysis_reference"].strip():
         errors.append("请填写外部分析来源及版本")
     members = project.get("members")
+    sheetpile = project.get('sheetpile', {})
+    if sheetpile:
+        from .sheetpile import validate_request
+        errors.extend(validate_request(sheetpile))
+    if isinstance(members, list) and not members and sheetpile:
+        return errors
     if not isinstance(members, list) or not members:
         return errors + ["请录入至少一项构件／工况内力"]
     seen = set()

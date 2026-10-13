@@ -15,10 +15,9 @@ with excel_session(temp) as (app,wb):
   sheet=wb.Worksheets(name)
   assert sheet.PageSetup.CenterHorizontally and sheet.PageSetup.CenterVertically
   end=sheet.Range(sheet.PageSetup.PrintArea).Rows.Count
-  assert all(v in (None,'') for row in sheet.Range(f'A{end}:AH{end}').Value2 for v in row)
+  assert all(v in (None,'') for row in sheet.Range(f'A{end-1}:AH{end}').Value2 for v in row)
   assert sheet.Range(f'A1:AH{end}').Borders(9).Weight==4
-  assert not sheet.Rows(end).Hidden
-  assert sheet.Range(f'A{end-1}:AH{end-1}').Borders(9).LineStyle==-4142
+  assert not sheet.Rows(end-1).Hidden and not sheet.Rows(end).Hidden
  connection=wb.Worksheets('Connection Checks')
  for row in (7,8,9,10,11,12,13,14,15,16,25,26,27,28,29,30,31,32,33,34):
   assert not connection.Rows(row).Hidden

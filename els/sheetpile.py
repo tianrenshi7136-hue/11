@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 import shutil
 import uuid
+import tempfile
 
 from .core import finite
 from .templates import sha256
@@ -30,7 +31,8 @@ def validate_request(request):
         errors.append('请选择手动型号或最轻合格截面')
     if request.get('selection_mode') == 'manual' and request.get('section') not in SECTIONS:
         errors.append('请选择模板中的钢板桩型号')
-    for key in ('yield_strength_mpa', 'analysis_ei_knm2_per_m'):
+    keys = ('yield_strength_mpa',) if request.get('purpose') == 'preselection' else ('yield_strength_mpa', 'analysis_ei_knm2_per_m')
+    for key in keys:
         if not finite(request.get(key)) or request[key] <= 0:
             errors.append(f'{key}须填写正数')
     for key in ('shear_reduction', 'bending_reduction', 'stiffness_reduction'):
@@ -67,6 +69,17 @@ def envelope(request):
     m = max(cases, key=lambda c: abs(c['m_knm_per_m']))
     return {'v': abs(v['v_kn_per_m']), 'm': abs(m['m_knm_per_m']),
             'v_case': v['name'], 'm_case': m['name']}
+
+
+def rejection_message(candidates, mode):
+    heading = (f"当前指定型号 {candidates[0]['section']} 未通过验算（只检查该型号，未自动尝试其他型号）。"
+               if mode == 'manual' and candidates else '候选库中无合格截面。')
+    lines = [heading, '未生成计算书或PDF。以下数值为1.4倍模型内力／承载力：']
+    for c in candidates:
+        lines.extend([c['section'],
+            f"  剪力：{c['design_shear']:.2f} / {c['shear_capacity']:.2f} kN/m；利用率{c['shear_utilization']:.1%}，{'通过' if c['shear_utilization'] < 1 else '未通过'}",
+            f"  弯矩：{c['design_moment']:.2f} / {c['moment_capacity']:.2f} kNm/m；利用率{c['moment_utilization']:.1%}，{'通过' if c['moment_utilization'] < 1 else '未通过'}"])
+    return '\n'.join(lines)
 
 
 @contextmanager
@@ -167,11 +180,42 @@ def calculate_candidate(wb, section, request, actions):
     for key, expected_value in [('shear_capacity', expected_shear), ('moment_capacity', expected_moment), ('ei_knm2_per_m', expected_ei)]:
         if not math.isclose(result[key], expected_value, rel_tol=1e-9):
             raise ValueError(f'{key}与独立模板算式核对不一致')
-    result['requires_reanalysis'] = not math.isclose(result['ei_knm2_per_m'], request['analysis_ei_knm2_per_m'], rel_tol=1e-6)
+    reference = request.get('analysis_ei_knm2_per_m')
+    result['requires_reanalysis'] = finite(reference) and not math.isclose(result['ei_knm2_per_m'], reference, rel_tol=1e-6)
+    return result
+
+
+def preselect(request, mapping_path, output_root):
+    if request.get('purpose') != 'preselection' or request.get('selection_mode') != 'lightest':
+        raise ValueError('截面初选须使用独立初选输入')
+    actions = envelope(request)
+    mapping = json.loads(Path(mapping_path).read_text(encoding='utf-8'))
+    template = Path(mapping['file'])
+    if sha256(template) != mapping['sha256']:
+        raise ValueError('模板指纹变化，请重新登记')
+    with tempfile.TemporaryDirectory() as folder:
+        copy = Path(folder) / 'preselection.xls'
+        shutil.copy2(template, copy)
+        with excel_session(copy) as (app, wb):
+            check_template(wb)
+            candidates = [calculate_candidate(wb, section, request, actions) for section in SECTIONS]
+    for c in candidates:
+        c.pop('requires_reanalysis', None)
+    passed = [c for c in candidates if c['status'] == 'OK']
+    result = {'purpose': 'preselection', 'request': request, 'envelope': actions, 'candidates': candidates,
+              'selected': min(passed, key=lambda c: c['weight_kg_per_m2']) if passed else None,
+              'status': 'PRELIMINARY_SELECTION_ONLY', 'template_sha256': mapping['sha256']}
+    if sha256(template) != mapping['sha256']:
+        raise ValueError('模板在初选期间发生变化')
+    output = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
+    output.mkdir(parents=True)
+    (output / 'preselection.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
     return result
 
 
 def generate(request, mapping_path, output_root, project_name):
+    if request.get('selection_mode') != 'manual' or request.get('purpose') == 'preselection':
+        raise ValueError('计算书生成只验证指定型号；请在独立截面初选页面比较候选')
     actions = envelope(request)
     if not isinstance(project_name, str) or not project_name.strip():
         raise ValueError('项目名称不能为空')
@@ -185,6 +229,7 @@ def generate(request, mapping_path, output_root, project_name):
     target = folder / '钢板桩结构计算_待复核.xls'
     pdf = folder / '钢板桩结构计算_待复核.pdf'
     shutil.copy2(template, target)
+    candidates = []
     try:
         with excel_session(target) as (app, wb):
             check_template(wb)
@@ -192,7 +237,7 @@ def generate(request, mapping_path, output_root, project_name):
             candidates = [calculate_candidate(wb, section, request, actions) for section in options]
             passed = [c for c in candidates if c['status'] == 'OK']
             if not passed:
-                raise ValueError('无合格截面，未生成计算书或PDF；请调整候选范围或重新设计')
+                raise ValueError(rejection_message(candidates, request['selection_mode']))
             selected = min(passed, key=lambda c: (c['weight_kg_per_m2'], SECTIONS.index(c['section'])))
             selected = calculate_candidate(wb, selected['section'], request, actions)
             sheet = wb.Worksheets('FSPiv Summary')
@@ -287,5 +332,5 @@ def generate(request, mapping_path, output_root, project_name):
         for p in (target, pdf):
             if p.exists():
                 p.unlink()
-        (folder / 'failure.json').write_text(json.dumps({'error': str(exc), 'request': request}, ensure_ascii=False, indent=2), encoding='utf-8')
+        (folder / 'failure.json').write_text(json.dumps({'error': str(exc), 'request': request, 'envelope': actions, 'candidates': candidates}, ensure_ascii=False, indent=2), encoding='utf-8')
         raise

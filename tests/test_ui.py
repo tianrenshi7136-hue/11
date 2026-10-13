@@ -17,6 +17,33 @@ from test_sheetpile import request as steel_request
 
 @unittest.skipIf(QApplication is None, "PySide6 not installed")
 class DesktopTests(unittest.TestCase):
+    def test_preselection_adoption_never_copies_reference_forces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'separate.db')
+            r = steel_request()
+            r.update(purpose='preselection', selection_mode='lightest', analysis_ei_knm2_per_m=None)
+            window.load_initial(r)
+            result = {'request': window.collect_initial(), 'selected': {'section': 'FSP VL', 'ei_knm2_per_m': 64575}, 'candidates': []}
+            window.initial_completed(result)
+            window.adopt_initial()
+            manual = window.collect_steel()
+            self.assertEqual(manual['section'], 'FSP VL')
+            self.assertEqual(manual['selection_mode'], 'manual')
+            self.assertEqual(manual['cases'], [])
+            self.assertEqual(manual['source'], '')
+            self.assertEqual(manual['analysis_ei_knm2_per_m'], 64575)
+            self.assertEqual(len(window.collect_initial()['cases']), 2)
+            window.close()
+
+    def test_legacy_auto_selection_moves_to_initial_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'legacy.db')
+            p = valid_project()
+            p['sheetpile'] = dict(steel_request(), selection_mode='lightest')
+            window.load_form(p)
+            self.assertEqual(window.collect_steel()['cases'], [])
+            self.assertEqual(len(window.collect_initial()['cases']), 2)
+            window.close()
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])

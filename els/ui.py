@@ -7,11 +7,11 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextEdit, QVBoxLayout, QWidget)
+    QTextEdit, QVBoxLayout, QWidget, QScrollArea)
 
 from .core import ProjectStore, export_project, import_project, new_project, validate
 from .templates import inspect_excel, readiness
-from .sheetpile import SECTIONS, draft as sheetpile_draft, generate as generate_sheetpile, validate_request
+from .sheetpile import SECTIONS, draft as sheetpile_draft, generate as generate_sheetpile, validate_request, preselect
 from .sections import properties, YIELD_MPA, E_KN_PER_MM2, TABLE_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -31,6 +31,21 @@ class SheetpileWorker(QThread):
     def run(self):
         try:
             self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name))
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
+class PreselectionWorker(QThread):
+    completed = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, request):
+        super().__init__()
+        self.request = request
+
+    def run(self):
+        try:
+            self.completed.emit(preselect(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile-preselection'))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -163,10 +178,10 @@ class Workbench(QMainWindow):
         self.steel_mode = QComboBox()
         self.steel_mode.addItem('手动指定型号', 'manual')
         self.steel_mode.addItem('选择最轻合格截面', 'lightest')
-        sf.addRow('选型方式', self.steel_mode)
+        self.steel_mode.hide()  # Historical project compatibility, never an output-mode selector.
         self.steel_section = QComboBox()
         self.steel_section.addItems(['请选择'] + SECTIONS)
-        sf.addRow('钢板桩型号', self.steel_section)
+        sf.addRow('分析模型采用的钢板桩型号', self.steel_section)
         self.steel_fields = {}
         for key, label in [('yield_strength_mpa', '自动材料强度 (MPa)'), ('shear_reduction', '设计折减系数（剪力／弯矩共用）'), ('stiffness_reduction', 'EI折减系数 Bd'), ('analysis_ei_knm2_per_m', '自动折减EI (kN·m²/m)'), ('source', '钢板桩分析文件／版本'), ('parameter_reference', '自动参数来源')]:
             edit = QLineEdit()
@@ -188,6 +203,7 @@ class Workbench(QMainWindow):
         steel_layout.addWidget(self.steel_properties)
         steel_layout.addWidget(QLabel('每根：A cm²、I cm⁴、Z cm³、m kg/m；每米墙：A cm²/m、I cm⁴/m、Z cm³/m、m kg/m²。\nE=205 kN/mm²；分析模型直接采用Excel生成的EI，无需重复核对。'))
         self.steel_cases = QTableWidget(0, 3)
+        self.steel_cases.setMinimumHeight(120)
         self.steel_cases.setHorizontalHeaderLabels(['工况名称', '模型剪力 (kN/m)', '模型弯矩 (kN·m/m)'])
         self.steel_cases.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         steel_layout.addWidget(self.steel_cases)
@@ -196,14 +212,64 @@ class Workbench(QMainWindow):
             button = QPushButton(label)
             button.clicked.connect(action)
             sb.addWidget(button)
-        self.steel_generate = QPushButton('生成计算书与PDF（待复核）')
+        self.steel_generate = QPushButton('验算指定型号并生成计算书／PDF')
         self.steel_generate.clicked.connect(self.generate_steel)
         sb.addWidget(self.steel_generate)
         steel_layout.addLayout(sb)
         self.steel_result = QTextEdit()
         self.steel_result.setReadOnly(True)
         steel_layout.addWidget(self.steel_result)
-        tabs.addTab(steel, '钢板桩结构计算')
+        steel_page = QWidget()
+        steel_page_layout = QVBoxLayout(steel_page)
+        steel_page_layout.addWidget(QLabel('截面初选 → 用拟选型号进行FREW／PLAXIS分析 → 验算该型号；两个流程分别保存输入。'))
+        self.steel_flows = QTabWidget()
+        steel_page_layout.addWidget(self.steel_flows)
+        initial = QWidget()
+        il = QVBoxLayout(initial)
+        il.addWidget(QLabel('截面初选：按参考内力比较六种型号，提供拟选型号及模型刚度。初选不生成验算计算书或PDF。'))
+        initial_form = QFormLayout()
+        self.initial_fields = {}
+        for key, label in [('design_reduction', '设计折减系数（剪力／弯矩共用）'), ('stiffness_reduction', 'EI折减系数 Bd'), ('source', '参考内力来源／说明')]:
+            edit = QLineEdit()
+            self.initial_fields[key] = edit
+            initial_form.addRow(label, edit)
+            edit.textChanged.connect(self.initial_changed)
+        il.addLayout(initial_form)
+        self.initial_cases = QTableWidget(0, 3)
+        self.initial_cases.setHorizontalHeaderLabels(['参考工况', '未乘1.4的剪力 (kN/m)', '未乘1.4的弯矩 (kNm/m)'])
+        self.initial_cases.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.initial_cases.itemChanged.connect(self.initial_changed)
+        il.addWidget(self.initial_cases)
+        ib = QHBoxLayout()
+        for label, action in [('增加参考工况', self.add_initial_case), ('删除参考工况', self.delete_initial_cases)]:
+            button = QPushButton(label)
+            button.clicked.connect(action)
+            ib.addWidget(button)
+        self.initial_run = QPushButton('比较候选并选择最轻截面')
+        self.initial_run.clicked.connect(self.run_preselection)
+        ib.addWidget(self.initial_run)
+        il.addLayout(ib)
+        self.initial_comparison = QTableWidget(0, 7)
+        self.initial_comparison.setHorizontalHeaderLabels(['型号', '重量 kg/m²', '剪力利用率', '弯矩利用率', '折减EI', '参考内力下结果', '推荐'])
+        self.initial_comparison.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.initial_comparison.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        il.addWidget(self.initial_comparison)
+        self.initial_result = QTextEdit()
+        self.initial_result.setReadOnly(True)
+        self.initial_result.setMaximumHeight(100)
+        il.addWidget(self.initial_result)
+        self.initial_adopt = QPushButton('采用拟选型号（清空验算内力，准备外部分析）')
+        self.initial_adopt.setEnabled(False)
+        self.initial_adopt.clicked.connect(self.adopt_initial)
+        il.addWidget(self.initial_adopt)
+        self.steel_flows.addTab(initial, '1 截面初选')
+        steel_scroll = QScrollArea()
+        steel_scroll.setWidgetResizable(True)
+        steel_scroll.setWidget(steel)
+        self.steel_flows.addTab(steel_scroll, '2 指定截面验算')
+        tabs.addTab(steel_page, '钢板桩结构计算')
+        self.initial_worker = None
+        self.initial_selection = None
         self.steel_worker = None
         for widget in self.steel_fields.values():
             widget.textChanged.connect(self.steel_changed)
@@ -227,6 +293,9 @@ class Workbench(QMainWindow):
         p.update({k: widget.value() for k, widget in self.geometry.items()})
         p["members"] = []
         p['sheetpile'] = self.collect_steel()
+        initial = self.collect_initial()
+        if initial or 'sheetpile_preselection' in p:
+            p['sheetpile_preselection'] = initial
         for row in range(self.table.rowCount()):
             member = {}
             for col, key in enumerate(FIELDS):
@@ -254,13 +323,21 @@ class Workbench(QMainWindow):
         self.preview.project = p
         self.preview.update()
         self.state.setText("项目已载入；输入与模板尚需校验，未生成设计成果")
-        self.load_steel(p.get('sheetpile', {}))
+        steel_request = p.get('sheetpile', {})
+        legacy = steel_request.get('selection_mode') == 'lightest'
+        if legacy:
+            self.load_steel(dict(steel_request, selection_mode='manual', cases=[], source=''))
+            self.load_initial(p.get('sheetpile_preselection') or dict(steel_request, purpose='preselection', analysis_ei_knm2_per_m=None))
+            self.steel_result.setPlainText('旧自动选型输入已转入截面初选页。指定截面验算需要该型号分析后的新内力。')
+        else:
+            self.load_steel(steel_request)
+            self.load_initial(p.get('sheetpile_preselection', {}))
 
     def collect_steel(self):
         if self.steel_cases.rowCount() == 0 and self.steel_section.currentIndex() == 0 and self.steel_mode.currentIndex() == 0 and not any(self.steel_fields[k].text().strip() for k in ('shear_reduction', 'stiffness_reduction', 'source')):
             return {}
         r = sheetpile_draft()
-        r['selection_mode'] = self.steel_mode.currentData()
+        r['selection_mode'] = 'manual'
         r['section'] = self.steel_section.currentText() if self.steel_section.currentIndex() else ''
         for key, widget in self.steel_fields.items():
             text = widget.text().strip()
@@ -286,7 +363,7 @@ class Workbench(QMainWindow):
         self.steel_loading = True
         r = sheetpile_draft()
         r.update(request or {})
-        self.steel_mode.setCurrentIndex(1 if r['selection_mode'] == 'lightest' else 0)
+        self.steel_mode.setCurrentIndex(0)
         self.steel_section.setCurrentText(r['section'] or '请选择')
         for key, widget in self.steel_fields.items():
             if key == 'bending_reduction':
@@ -307,6 +384,105 @@ class Workbench(QMainWindow):
         for case in r['cases']:
             self.add_steel_case(case)
         self.steel_result.clear()
+        if request and request.get('selection_mode') == 'lightest':
+            self.steel_result.setPlainText('旧项目的自动选型已与验算分离。本页仅验证所选型号，请使用该型号分析后的内力。')
+
+    def collect_initial(self):
+        if not self.initial_cases.rowCount() and not any(w.text().strip() for w in self.initial_fields.values()):
+            return {}
+        r = sheetpile_draft()
+        r.update(purpose='preselection', selection_mode='lightest', yield_strength_mpa=YIELD_MPA,
+                 parameter_reference='工程师附表；fy=275 MPa；参考内力初选', source=self.initial_fields['source'].text().strip())
+        try:
+            factor = self.initial_fields['design_reduction'].text().strip()
+            bd = self.initial_fields['stiffness_reduction'].text().strip()
+            r.update(shear_reduction=float(factor) if factor else None, bending_reduction=float(factor) if factor else None,
+                     stiffness_reduction=float(bd) if bd else None)
+            for row in range(self.initial_cases.rowCount()):
+                values = [self.initial_cases.item(row, c).text().strip() if self.initial_cases.item(row, c) else '' for c in range(3)]
+                r['cases'].append({'name': values[0], 'v_kn_per_m': float(values[1]) if values[1] else None, 'm_knm_per_m': float(values[2]) if values[2] else None})
+        except ValueError:
+            raise ValueError('初选的折减系数及参考内力须为数字')
+        return r
+
+    def load_initial(self, request):
+        self.initial_cases.setRowCount(0)
+        for key, field in self.initial_fields.items():
+            value = request.get('shear_reduction' if key == 'design_reduction' else key)
+            field.setText('' if value is None else str(value))
+        for case in request.get('cases', []):
+            self.add_initial_case(case)
+        self.initial_changed()
+        self.initial_result.clear()
+
+    def add_initial_case(self, case=None):
+        case = case if isinstance(case, dict) else {}
+        row = self.initial_cases.rowCount()
+        self.initial_cases.insertRow(row)
+        for col, key in enumerate(('name', 'v_kn_per_m', 'm_knm_per_m')):
+            value = case.get(key)
+            self.initial_cases.setItem(row, col, QTableWidgetItem('' if value is None else str(value)))
+        self.initial_changed()
+
+    def delete_initial_cases(self):
+        for row in sorted({i.row() for i in self.initial_cases.selectedIndexes()}, reverse=True):
+            self.initial_cases.removeRow(row)
+        self.initial_changed()
+
+    def initial_changed(self, *args):
+        if hasattr(self, 'initial_adopt'):
+            self.initial_adopt.setEnabled(False)
+            self.initial_selection = None
+            self.initial_comparison.setRowCount(0)
+            if self.initial_result.toPlainText():
+                self.initial_result.setPlainText('初选输入已修改，请重新比较。')
+
+    def run_preselection(self):
+        def action():
+            r = self.collect_initial()
+            errors = validate_request(r)
+            if errors:
+                raise ValueError('\n'.join(errors))
+            self.initial_run.setEnabled(False)
+            self.initial_adopt.setEnabled(False)
+            self.initial_result.setPlainText('正在使用Excel比较候选截面…')
+            self.initial_worker = PreselectionWorker(r)
+            self.initial_worker.completed.connect(self.initial_completed)
+            self.initial_worker.failed.connect(lambda error: self.initial_result.setPlainText('初选未完成：' + error))
+            self.initial_worker.finished.connect(lambda: self.initial_run.setEnabled(True))
+            self.initial_worker.start()
+        self.guarded(action)
+
+    def initial_completed(self, result):
+        try:
+            if result['request'] != self.collect_initial():
+                self.initial_result.setPlainText('初选期间输入已修改，结果已过期。')
+                return
+        except ValueError:
+            self.initial_result.setPlainText('初选期间输入已修改，结果已过期。')
+            return
+        self.initial_selection = result
+        selected = result['selected']
+        self.initial_comparison.setRowCount(len(result['candidates']))
+        for row, c in enumerate(result['candidates']):
+            values = [c['section'], f"{c['weight_kg_per_m2']:g}", f"{c['shear_utilization']:.3f}", f"{c['moment_utilization']:.3f}", f"{c['ei_knm2_per_m']:g}", '满足' if c['status']=='OK' else '不满足', '最轻候选' if selected and c['section']==selected['section'] else '']
+            for col, value in enumerate(values):
+                self.initial_comparison.setItem(row, col, QTableWidgetItem(value))
+        self.initial_adopt.setEnabled(selected is not None)
+        self.initial_result.setPlainText(f"拟选型号：{selected['section']}；折减EI：{selected['ei_knm2_per_m']:g}。\n请采用该型号进行外部分析，再到指定截面验算页输入新分析内力。" if selected else '参考内力下没有满足条件的候选型号。')
+
+    def adopt_initial(self):
+        if not self.initial_selection or not self.initial_selection['selected']:
+            return
+        r = self.initial_selection['request']
+        selected = self.initial_selection['selected']
+        manual = sheetpile_draft()
+        manual.update(section=selected['section'], yield_strength_mpa=YIELD_MPA,
+                      shear_reduction=r['shear_reduction'], bending_reduction=r['bending_reduction'], stiffness_reduction=r['stiffness_reduction'],
+                      analysis_ei_origin='section_table', parameter_reference=r['parameter_reference'])
+        self.load_steel(manual)
+        self.steel_flows.setCurrentIndex(1)
+        self.steel_result.setPlainText('已采用拟选型号和折减系数。请先完成外部分析，再填写该型号的模型内力及来源。初选参考内力没有转入验算。')
 
     def update_steel_properties(self, *args, preserve_model_ei=False):
         if getattr(self, 'steel_loading', False):
@@ -383,7 +559,7 @@ class Workbench(QMainWindow):
         self.steel_result.setPlainText('生成未完成：\n' + message)
 
     def closeEvent(self, event):
-        if self.steel_worker is not None and self.steel_worker.isRunning():
+        if (self.steel_worker is not None and self.steel_worker.isRunning()) or (self.initial_worker is not None and self.initial_worker.isRunning()):
             QMessageBox.information(self, 'Excel正在生成', '请等待本次生成结束后再关闭窗口。')
             event.ignore()
         else:

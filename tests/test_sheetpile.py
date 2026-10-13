@@ -1,5 +1,5 @@
 import unittest
-from els.sheetpile import draft, envelope, validate_request
+from els.sheetpile import draft, envelope, validate_request, rejection_message, generate
 
 
 def request():
@@ -13,6 +13,20 @@ def request():
 
 
 class SheetpileTests(unittest.TestCase):
+    def test_preselection_has_no_analysis_baseline_and_cannot_generate(self):
+        r = request()
+        r.update(purpose='preselection', selection_mode='lightest', analysis_ei_knm2_per_m=None)
+        self.assertEqual(validate_request(r), [])
+        with self.assertRaisesRegex(ValueError, '只验证指定型号'):
+            generate(r, 'not-read.json', 'not-created', 'test')
+    def test_rejection_identifies_manual_scope_and_controlling_check(self):
+        msg = rejection_message([{'section': 'FSP IV', 'design_shear': 140, 'shear_capacity': 665.38,
+            'shear_utilization': .2104, 'design_moment': 560, 'moment_capacity': 436.975,
+            'moment_utilization': 1.281537845}], 'manual')
+        self.assertIn('未自动尝试其他型号', msg)
+        self.assertIn('560.00 / 436.98', msg)
+        self.assertIn('128.2%，未通过', msg)
+        self.assertIn('21.0%，通过', msg)
     def test_missing_input_does_not_default_to_template(self):
         self.assertTrue(validate_request(draft()))
         r = request()

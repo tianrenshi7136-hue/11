@@ -43,7 +43,7 @@ failure_root = root / 'outputs/sheetpile-failure-validation'
 try:
     generate(failed, mapping, failure_root, 'NO QUALIFIED SECTION TEST')
 except ValueError as exc:
-    assert '无合格截面' in str(exc)
+    assert '未通过验算' in str(exc)
 else:
     raise AssertionError('Failed design unexpectedly generated')
 assert not list(failure_root.rglob('*.xls'))

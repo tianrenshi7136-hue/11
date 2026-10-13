@@ -2,8 +2,8 @@
 
 
 def setup_print(ws, last_content_row, app):
-    bottom = last_content_row + 2
-    ws.Range(f'A{last_content_row}:AH{last_content_row}').Borders(9).Weight = 2
+    bottom = last_content_row + 1
+    ws.Range(f'A{last_content_row}:AH{last_content_row}').Borders(9).LineStyle = -4142
     padding = ws.Range(f'A{last_content_row+1}:AH{bottom}')
     padding.UnMerge()
     padding.Clear()

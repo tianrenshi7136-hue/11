@@ -14,9 +14,11 @@ with excel_session(temp) as (app,wb):
  for name in result['output_sheets']:
   sheet=wb.Worksheets(name)
   assert sheet.PageSetup.CenterHorizontally and sheet.PageSetup.CenterVertically
+  assert sheet.Range(sheet.PageSetup.PrintArea).Columns.Count==35
+  assert sheet.Range('A2:AI2').Borders(9).LineStyle==1
   end=sheet.Range(sheet.PageSetup.PrintArea).Rows.Count
-  assert all(v in (None,'') for row in sheet.Range(f'A{end-1}:AH{end}').Value2 for v in row)
-  assert sheet.Range(f'A1:AH{end}').Borders(9).Weight==4
+  assert all(v in (None,'') for row in sheet.Range(f'A{end-1}:AI{end}').Value2 for v in row)
+  assert sheet.Range(f'A1:AI{end}').Borders(9).Weight==4
   assert not sheet.Rows(end-1).Hidden and not sheet.Rows(end).Hidden
  connection=wb.Worksheets('Connection Checks')
  for row in (7,8,9,10,11,12,13,14,15,16,25,26,27,28,29,30,31,32,33,34):

@@ -17,6 +17,31 @@ from test_sheetpile import request as steel_request
 
 @unittest.skipIf(QApplication is None, "PySide6 not installed")
 class DesktopTests(unittest.TestCase):
+    def tearDown(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+        for widget in self.app.topLevelWidgets():
+            widget.close()
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+
+    def test_support_package_roundtrip_and_geometry_staleness(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'support.db')
+            p = valid_project()
+            p['sheetpile'] = steel_request()
+            package = {'enabled': True, 'source': 'TEST', 'members': [], 'welds': [], 'blinding_thickness_mm': 300}
+            p['support_design'] = package
+            window.load_form(p)
+            saved = window.collect()
+            self.assertEqual(saved['support_design']['blinding_thickness_mm'], 300)
+            self.assertTrue(saved['sheetpile']['support_package']['enabled'])
+            window.steel_result.setPlainText('Old output')
+            window.geometry['width_m'].setValue(7)
+            self.assertIn('修改', window.steel_result.toPlainText())
+            self.assertEqual(window.collect_support()['width_m'], 7)
+            window.close()
+
     def test_project_subject_metadata_roundtrip(self):
         with tempfile.TemporaryDirectory() as folder:
             dialog = ProjectDetailsDialog()

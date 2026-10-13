@@ -1,0 +1,349 @@
+"""Template-driven steel members, direct fillet welds and blinding concrete."""
+import math
+import re
+from pathlib import Path
+import json
+
+from .core import finite
+from .templates import sha256
+
+ROOT = Path(__file__).resolve().parent.parent
+BLINDING_FILE = ROOT / '新计算书/Structural capacity AA section.xlsx'
+MEMBER_FIELDS = ('member_id', 'case', 'kind', 'section', 'grade', 'anchor_kn_per_m',
+                 'load_width_m', 'load_span_m', 'angle_deg', 'lx_m', 'ly_m', 'kx', 'ky', 'klt')
+WELD_FIELDS = ('member_id', 'case', 'kind', 'leg_mm', 'strength_mpa', 'effective_length_mm', 'distribution_length_m')
+
+
+def section_library():
+    import xlrd
+    config = json.loads((ROOT / 'templates/sheetpile-structure.local.json').read_text(encoding='utf-8'))
+    b = xlrd.open_workbook(config['file'])
+    s = b.sheet_by_name('Section Table UC')
+    return [s.cell_value(row, 0) for row in range(4, min(128, s.nrows))
+            if s.cell_type(row, 0) == 1 and 'x' in s.cell_value(row, 0)]
+
+
+def validate_package(package, library=None):
+    if not isinstance(package, dict):
+        return ['构件输入须为对象']
+    errors, seen = [], set()
+    members = package.get('members', [])
+    if not isinstance(members, list) or not members:
+        return ['至少录入一个支撑或围檩工况']
+    for i, m in enumerate(members, 1):
+        if not isinstance(m, dict):
+            errors.append(f'构件{i}格式无效')
+            continue
+        key = (m.get('member_id'), m.get('case'))
+        if any(not isinstance(x, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,12}', x) for x in key):
+            errors.append(f'构件{i}编号及工况须为1～12位英文字母／数字／短横线')
+        elif key in seen:
+            errors.append(f'构件{i}编号与工况重复')
+        else:
+            seen.add(key)
+        if m.get('kind') not in ('Strut', 'Waler'):
+            errors.append(f'构件{i}类型无效')
+        if not m.get('section') or (library is not None and m['section'] not in library):
+            errors.append(f'构件{i}截面不在模板库')
+        if m.get('grade') not in ('S235', 'S275', 'S355', 'S460'):
+            errors.append(f'构件{i}钢材等级无效')
+        for field in MEMBER_FIELDS[5:]:
+            v = m.get(field)
+            if not finite(v) or (field not in ('anchor_kn_per_m', 'angle_deg') and v <= 0):
+                errors.append(f'构件{i} {field}须填写有效数值')
+        if finite(m.get('angle_deg')) and not 0 <= m['angle_deg'] < 90:
+            errors.append(f'构件{i}角度须在0～90度之间，不含90度')
+    welds = package.get('welds', [])
+    if not isinstance(welds, list) or not welds:
+        errors.append('至少录入一项模板直接受力焊缝连接')
+        welds = []
+    linked = {(m.get('member_id'), m.get('case')): m for m in members if isinstance(m, dict)}
+    weld_seen = set()
+    for i, w in enumerate(welds, 1):
+        if not isinstance(w, dict):
+            errors.append(f'焊缝{i}格式无效')
+            continue
+        key = (w.get('member_id'), w.get('case'))
+        m = linked.get(key)
+        kind = w.get('kind')
+        if not m or kind not in ('Strut-Waler', 'Waler-Sheetpile') or m.get('kind') != ('Strut' if kind == 'Strut-Waler' else 'Waler'):
+            errors.append(f'焊缝{i}构件关联或连接类型错误')
+        if key + (kind,) in weld_seen:
+            errors.append(f'焊缝{i}连接重复')
+        weld_seen.add(key + (kind,))
+        for field in ('leg_mm', 'strength_mpa') + (('effective_length_mm', 'distribution_length_m') if kind == 'Waler-Sheetpile' else ()):
+            if not finite(w.get(field)) or w[field] <= 0:
+                errors.append(f'焊缝{i} {field}须填写正数')
+    for key in ('length_m', 'width_m', 'blinding_thickness_mm'):
+        if not finite(package.get(key)) or package[key] <= 0:
+            errors.append(f'{key}须填写正数；垫层有效长度取基坑短边')
+    if not isinstance(package.get('source'), str) or not package['source'].strip():
+        errors.append('请填写anchor force分析来源及版本')
+    return errors
+
+
+def member_actions(m, area_cm2):
+    w = abs(m['anchor_kn_per_m'])
+    q = 1.4 * 77 * area_cm2 / 10000
+    if m['kind'] == 'Strut':
+        return {'n': 1.4*w*m['load_width_m']/math.cos(math.radians(m['angle_deg'])),
+                'v': q*m['load_span_m']/2, 'mx': q*m['load_span_m']**2/8, 'my': 0.0}
+    return {'n': 1.4*w*m['load_width_m'], 'v': 1.4*w*m['load_span_m']/2,
+            'mx': 1.4*w*m['load_span_m']**2/8, 'my': q*m['ly_m']**2/8}
+
+
+def blinding_reference(force_kn_per_m, length_m, width_m, thickness_mm):
+    le = min(length_m, width_m)*1000
+    h = thickness_mm
+    ex = max(h/20, 20)
+    ea = le**2/(2500*h)
+    capacities = [0.3*(h-2*ex)*20, 0.3*(h-2*(ex+ea))*20]
+    demand = 1.4*abs(force_kn_per_m)
+    return {'effective_length_mm': le, 'thickness_mm': h, 'fcu_mpa': 20,
+            'demand_kn_per_m': demand, 'eccentricity_mm': ex, 'additional_eccentricity_mm': ea,
+            'capacities_kn_per_m': capacities, 'slenderness': le/h,
+            'status': 'PASS' if le/h <= 30 and min(capacities) >= demand and min(capacities)>0 else 'FAIL'}
+
+
+def numeric(ws, address):
+    value = ws.Range(address).Value2
+    if not finite(value) or str(ws.Range(address).Text) in ('#N/A', '#REF!', '#VALUE!', '#DIV/0!', '#NUM!', '#NAME?'):
+        raise ValueError(f'{ws.Name}!{address}公式未返回有效数值：{ws.Range(address).Text}，公式 {ws.Range(address).Formula}')
+    return float(value)
+
+
+def page_style(ws, project, subject, last_row, app):
+    ws.Visible = -1
+    ws.Range('D3').Value2 = "'" + project
+    ws.Range('D4').Value2 = "'" + subject
+    for address in ('R3', 'V3', 'AB3', 'AG3', 'V4', 'AB4'):
+        ws.Range(address).MergeArea.ClearContents()
+    for index in range(ws.Shapes.Count, 0, -1):
+        shape = ws.Shapes.Item(index)
+        if shape.Type in (11, 13) and shape.TopLeftCell.Row <= 2:
+            shape.Delete()
+    header = ws.Range('A2:AH2')
+    header.UnMerge()
+    header.Merge()
+    header.Value2 = 'STRUCTURAL CALCULATIONS'
+    header.Font.Name = 'Arial'
+    header.Font.Bold = True
+    header.HorizontalAlignment = -4108
+    ws.Rows(f'{last_row+1}:65536').Hidden = True
+    ws.PageSetup.PrintArea = f'$A$1:$AH${last_row}'
+    ws.PageSetup.Zoom = False
+    ws.PageSetup.FitToPagesWide = 1
+    ws.PageSetup.FitToPagesTall = 1
+    ws.PageSetup.CenterHeader = 'REVIEW DRAFT'
+    ws.PageSetup.CenterFooter = ''
+    for margin in ('LeftMargin', 'RightMargin', 'TopMargin', 'BottomMargin'):
+        setattr(ws.PageSetup, margin, app.InchesToPoints(.25))
+    ws.PageSetup.HeaderMargin = app.InchesToPoints(.1)
+    ws.PageSetup.FooterMargin = app.InchesToPoints(.1)
+    for edge in (7, 8, 9, 10):
+        border = ws.Range(f'A1:AH{last_row}').Borders(edge)
+        border.LineStyle, border.Weight = 1, 4
+
+
+def report_row(ws, row, values, ranges, header=False):
+    for value, (left, right) in zip(values, ranges):
+        cells=ws.Range(f'{left}{row}:{right}{row}')
+        cells.Merge()
+        cells.Value2=value
+        cells.WrapText=True
+        cells.Font.Size=9
+        cells.Font.Bold=header
+        cells.Borders.LineStyle=1
+        if finite(value):
+            cells.NumberFormat='0.000'
+        cells.VerticalAlignment=-4108
+    ws.Rows(f'{row}:{row}').RowHeight=32
+
+
+def populate(wb, package, actions, project, subject):
+    errors = validate_package(package, section_library())
+    if errors:
+        raise ValueError('\n'.join(errors))
+    app = wb.Application
+    registry = json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf-8'))
+    blinding_file=Path(registry['blinding_file'])
+    if sha256(blinding_file) != registry['blinding_sha256']:
+        raise ValueError('Blinding模板指纹变化，请重新审查及登记')
+    output, results, member_sheets = [], [], {}
+    def copy_sheet(name):
+        source = wb.Worksheets(name)
+        visibility = source.Visible
+        source.Visible = -1
+        try:
+            source.Copy(wb.Worksheets('FSPiv Summary'))
+            if app.ActiveSheet.Parent.FullName != wb.FullName:
+                raise ValueError('Excel模板页未复制到目标工作簿')
+            return app.ActiveSheet
+        finally:
+            source.Visible = visibility
+    summary = copy_sheet('Strut&Wailing Summary')
+    summary.Name = 'Member Summary'
+    summary.Range('A7:AH100').UnMerge()
+    summary.Range('A7:AH100').Clear()
+    inputs=copy_sheet('Strut&Wailing Summary')
+    inputs.Name='Member Inputs'
+    inputs.Range('A7:AH100').UnMerge()
+    inputs.Range('A7:AH100').Clear()
+    input_spans=[('A','B'),('C','D'),('E','F'),('G','J'),('K','L'),('M','O'),('P','R'),('S','U'),('V','W'),('X','Y'),('Z','AA'),('AB','AC'),('AD','AE'),('AF','AH')]
+    report_row(inputs,8,('Member','Case','Type','Section','Grade','Anchor kN/m','Width m','Span m','Angle deg','Lx m','Ly m','Kx','Ky','KLT'),input_spans,True)
+    spans=[('A','D'),('E','G'),('H','K'),('L','O'),('P','R'),('S','V'),('W','Z'),('AA','AD'),('AE','AH')]
+    report_row(summary,8,('Member','Case','Type','Section','Grade','Anchor kN/m','Design N kN','Max Utilization','Status'),spans,True)
+    for index, m in enumerate(package['members'], 9):
+        report_row(inputs,index,[m[k] for k in MEMBER_FIELDS],input_spans)
+        source = 'CCS1 ' if m['kind'] == 'Strut' else 'CW1'
+        ws = copy_sheet(source)
+        ws.Name = f"{'S' if m['kind']=='Strut' else 'W'}-{m['member_id']}-{m['case']}"
+        # Resolve table lookups inside this workbook rather than copied external names.
+        used = ws.UsedRange
+        rows, start_row, start_col = used.Formula, used.Row, used.Column
+        for ri, row in enumerate(rows):
+            for ci, formula in enumerate(row):
+                if isinstance(formula, str) and formula.startswith('=') and ',Table,' in formula:
+                    ws.Cells(start_row+ri, start_col+ci).Formula = formula.replace(',Table,', ",'Section Table UC'!$A$5:$X$128,")
+        ref=lambda col: f"'Member Inputs'!{col}{index}"
+        ws.Range('P11').Formula = '='+ref('G')
+        ws.Range('Y11').Formula = '='+ref('K')
+        ws.Range('F8').Value2 = m['member_id']+' / '+m['case']
+        for cell, col in [('J16','X'), ('J18','Z'), ('G17','AB'), ('G19','AD'), ('G20','AF')]:
+            ws.Range(cell).Formula = '='+ref(col)
+        ws.Calculate()
+        loads = member_actions(m, numeric(ws,'R15'))
+        ws.Range('J11').Formula=f'=1.4*ABS({ref("M")})*{ref("P")}' + (f'/COS(RADIANS({ref("V")}))' if m['kind']=='Strut' else '')
+        action_formula=ws.Range('J11').Formula[1:]
+        required=','.join(ref(c) for c in ('M','P','S','V','X','Z','AB','AD','AF'))
+        positive=','.join(ref(c) for c in ('P','S','X','Z','AB','AD','AF'))
+        ws.Range('J11').Formula=f'=IF(AND(COUNT({required})=9,MIN({positive})>0,{ref("V")}>=0,{ref("V")}<90),{action_formula},"INPUTS REQUIRED")'
+        if m['kind']=='Strut':
+            ws.Range('J12').Formula=f'=1.4*77*R15/10000*{ref("S")}/2'
+            ws.Range('J13').Formula=f'=J12*{ref("S")}/4'
+            ws.Range('J14').Value2=0
+        else:
+            ws.Range('J12').Formula=f'=1.4*ABS({ref("M")})*{ref("S")}/2'
+            ws.Range('J13').Formula=f'=1.4*ABS({ref("M")})*{ref("S")}^2/8'
+            ws.Range('J14').Formula='=1.4*77*R15/10000*J18^2/8'
+        ws.Calculate()
+        for cell,key in [('J11','n'),('J12','v'),('J13','mx'),('J14','my')]:
+            if not math.isclose(numeric(ws,cell),loads[key],rel_tol=1e-9,abs_tol=1e-9):
+                raise ValueError(f'{ws.Name}!{cell}内力公式与独立算式不一致')
+        # Preserve the engineer-corrected template references; reject stale copies.
+        for cell in ('L46', 'L48', 'L50'):
+            if not math.isclose(numeric(ws, cell), loads['n'], rel_tol=1e-9, abs_tol=1e-9):
+                raise ValueError(f'{ws.Name}!{cell}屈曲轴力未引用本构件设计轴力')
+        checks = {cell: numeric(ws, cell) for cell in ('U39','U46','U48','U50')}
+        checks['shear'] = loads['v']/numeric(ws,'E29')
+        checks['compression'] = loads['n']/min(numeric(ws,'U35'),numeric(ws,'U36'))
+        result = {'member': m, 'design_actions': loads, 'checks': checks,
+                  'status': 'PASS' if max(checks.values())<=1 else 'FAIL',
+                  'sheet': ws.Name, 'yield_strength_mpa': numeric(ws,'AD11')}
+        results.append(result)
+        member_sheets[(m['member_id'],m['case'])] = (ws, result)
+        report_row(summary,index,(m['member_id'],m['case'],m['kind'],m['section'],m['grade'],abs(m['anchor_kn_per_m']),round(loads['n'],3),round(max(checks.values()),3),result['status']),spans)
+        summary.Range(f'W{index}').Formula=f"='{ws.Name}'!J11"
+        summary.Range(f'AA{index}').Formula=f"=MAX('{ws.Name}'!U39,'{ws.Name}'!U46,'{ws.Name}'!U48,'{ws.Name}'!U50,'{ws.Name}'!J12/'{ws.Name}'!E29,'{ws.Name}'!J11/MIN('{ws.Name}'!U35,'{ws.Name}'!U36))"
+        source_checks=','.join(f"'{ws.Name}'!{c}" for c in ('U39','U46','U48','U50','J12','E29','J11','U35','U36'))
+        summary.Range(f'AE{index}').Formula=f'=IF(COUNT({source_checks})<9,"CHECK INPUTS / FORMULAS",IF(AA{index}<=1,"PASS","FAIL"))'
+        page_style(ws,project,subject,51,app)
+        output.append(ws.Name)
+    page_style(summary,project,subject,len(results)+8,app)
+    page_style(inputs,project,subject,len(results)+8,app)
+    for table in (summary,inputs):
+        table.Range('A6:AH6').UnMerge()
+        table.Range('A6:AH6').Merge()
+        table.Range('A6').Value2=table.Name.upper()
+    output.insert(0,summary.Name)
+    output.insert(1,inputs.Name)
+    weld_sheet=copy_sheet('Connection check')
+    weld_sheet.Name='Weld Checks'
+    weld_sheet.Range('A6:AH6').UnMerge()
+    weld_sheet.Range('A6:AH6').Merge()
+    weld_sheet.Range('A6').Value2='WELD CHECKS'
+    weld_sheet.Range('A7:AH100').UnMerge()
+    weld_sheet.Range('A7:AH100').Clear()
+    weld_spans=[('A','D'),('E','J'),('K','M'),('N','O'),('P','R'),('S','V'),('W','Y'),('Z','AC'),('AD','AH')]
+    report_row(weld_sheet,8,('Member / Case','Connection','Force','Leg mm','Strength MPa','Effective Length mm','Capacity','Units','Status'),weld_spans,True)
+    weld_results=[]
+    for index,w in enumerate(package['welds'],9):
+        ws,member=member_sheets[(w['member_id'],w['case'])]
+        if w['kind']=='Strut-Waler':
+            demand=member['design_actions']['n']
+            length=2*(numeric(ws,'R17')+(numeric(ws,'R17')-numeric(ws,'R18'))+numeric(ws,'R20'))
+            units='kN'
+        else:
+            demand=member['design_actions']['v']/w['distribution_length_m']
+            length=w['effective_length_mm']
+            units='kN/m'
+        report_row(weld_sheet,index,(w['member_id']+'/'+w['case'],w['kind'],demand,w['leg_mm'],w['strength_mpa'],length,'',units,''),weld_spans)
+        weld_sheet.Range(f'K{index}').Formula=f"='{ws.Name}'!J11" if w['kind']=='Strut-Waler' else f"='{ws.Name}'!J12/{w['distribution_length_m']}"
+        if w['kind']=='Strut-Waler':
+            weld_sheet.Range(f'S{index}').Formula=f"=2*('{ws.Name}'!R17+('{ws.Name}'!R17-'{ws.Name}'!R18)+'{ws.Name}'!R20)"
+        weld_sheet.Range(f'W{index}').Formula=f'=0.7*N{index}*P{index}*S{index}/1000'
+        for col in ('K','N','P','S','W'):
+            weld_sheet.Range(f'{col}{index}').NumberFormat='0.000'
+        weld_sheet.Range(f'AD{index}').Formula=f'=IF(COUNT(K{index},N{index},P{index},S{index},W{index})<5,"CHECK INPUTS / FORMULAS",IF(AND(MIN(N{index},P{index},S{index},W{index})>0,W{index}>=K{index}),"PASS","FAIL"))'
+        weld_sheet.Calculate()
+        cap=numeric(weld_sheet,f'W{index}')
+        weld_results.append({'input':w,'demand':demand,'capacity':cap,'units':units,'effective_length_mm':length,'status':'PASS' if cap>=demand else 'FAIL'})
+    note_row=len(weld_results)+10
+    note=weld_sheet.Range(f'A{note_row}:AH{note_row}')
+    note.Merge()
+    note.Value2='Direct, concentric fillet welds only; effective wall weld length is per metre of wall. Eccentric moment weld groups are outside this scope.'
+    note.WrapText=True
+    note.Font.Size=9
+    weld_sheet.Rows(f'{note_row}:{note_row}').RowHeight=36
+    page_style(weld_sheet,project,subject,note_row,app)
+    output.append(weld_sheet.Name)
+    # Copy only the engineer-selected Blinding worksheet from the separate source.
+    source_hash=sha256(blinding_file)
+    other=app.Workbooks.Open(str(blinding_file.resolve()),UpdateLinks=0,ReadOnly=True,AddToMru=False)
+    try:
+        # XLS has 65,536 rows: copy the controlled region of the XLSX source.
+        blind=copy_sheet('Blinding')
+        blind.Range('A1:AH100').UnMerge()
+        blind.Range('A1:AH100').Clear()
+        source_blind=other.Worksheets('Blinding')
+        for address,expected_formula in registry['expected_formulas'].items():
+            if source_blind.Range(address).Formula != expected_formula:
+                raise ValueError(f'Blinding!{address}公式与登记版本不同')
+        source_blind.Range('A1:AH27').Copy(blind.Range('A1'))
+        for col in range(1,35):
+            blind.Columns(col).ColumnWidth=source_blind.Columns(col).ColumnWidth
+        for row in range(1,28):
+            blind.Rows(row).RowHeight=source_blind.Rows(row).RowHeight
+    finally:
+        other.Close(False)
+    blind.Name='Blinding Concrete'
+    blind.Range('D8').Formula="='FSPiv Summary'!F50"
+    blind.Range('H9').Value2=1.4
+    blind.Range('D10').Value2=20
+    blind.Range('D11').Value2=package['blinding_thickness_mm']
+    blind.Range('D12').Value2=min(package['length_m'],package['width_m'])*1000
+    blind.Range('F13').Formula='=IF(D13<=G13,"<=",">")'
+    blind.Range('H13').Formula='=IF(AND(COUNT(D11,D12)=2,MIN(D11,D12)>0),IF(D13<=G13,"PASS","FAIL"),"INPUTS REQUIRED")'
+    for row in (22,26):
+        blind.Range(f'F{row}').Formula=f'=IF(C{row}>=G{row},">=","<")'
+        blind.Range(f'I{row}').Formula=f'=IF(AND(C{row}>0,C{row}>=G{row}),"PASS","FAIL")'
+        blind.Range(f'E{row}').Value2='kN/m'
+    blind.Range('B7').Value2='Assumption: blinding axial force equals the maximum unfactored sheetpile shear; effective length equals the pit short side.'
+    blind.Range('C24').Value2='0.3[h - 2(ex,2 + ea)]fcu'
+    page_style(blind,project,subject,27,app)
+    blind.Calculate()
+    expected=blinding_reference(actions['v'],package['length_m'],package['width_m'],package['blinding_thickness_mm'])
+    for cell,value in [('N9',expected['demand_kn_per_m']),('C22',expected['capacities_kn_per_m'][0]),('C26',expected['capacities_kn_per_m'][1])]:
+        if not math.isclose(numeric(blind,cell),value,rel_tol=1e-9):
+            raise ValueError('Blinding公式与独立算式不一致')
+    if sha256(blinding_file)!=source_hash:
+        raise ValueError('Blinding源文件在生成期间变化')
+    output.append(blind.Name)
+    result={'members':results,'welds':weld_results,'blinding':expected,'blinding_source_sha256':source_hash,
+            'assumptions':'Unfactored anchor kN/m; 1.4 applied once; template selfweight; direct concentric fillet welds; engineer-defined blinding shear-to-axial and short-side effective length.'}
+    failures=[m['sheet'] for m in results if m['status']=='FAIL']+[w['input']['member_id']+' weld' for w in weld_results if w['status']=='FAIL']
+    if expected['status']=='FAIL':
+        failures.append('Blinding Concrete')
+    if failures:
+        raise ValueError('新增模块验算未通过：'+', '.join(failures)+'\n'+json.dumps(result,ensure_ascii=False,indent=2))
+    return output,result

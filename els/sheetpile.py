@@ -218,6 +218,12 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
     if request.get('selection_mode') != 'manual' or request.get('purpose') == 'preselection':
         raise ValueError('计算书生成只验证指定型号；请在独立截面初选页面比较候选')
     actions = envelope(request)
+    support_package=request.get('support_package')
+    if support_package:
+        from .supports import validate_package, section_library
+        errors=validate_package(support_package,section_library())
+        if errors:
+            raise ValueError('\n'.join(errors))
     if not isinstance(project_name, str) or not project_name.strip():
         raise ValueError('项目名称不能为空')
     if not isinstance(subject_name, str) or not subject_name.strip():
@@ -231,8 +237,9 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
         raise ValueError('模板指纹变化，请重新检查及登记模板')
     folder = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     folder.mkdir(parents=True, exist_ok=False)
-    target = folder / 'Sheetpile_Structural_Check_Review.xls'
-    pdf = folder / 'Sheetpile_Structural_Check_Review.pdf'
+    output_name='ELS_Structural_Check_Review' if support_package else 'Sheetpile_Structural_Check_Review'
+    target = folder / (output_name+'.xls')
+    pdf = folder / (output_name+'.pdf')
     shutil.copy2(template, target)
     candidates = []
     try:
@@ -274,6 +281,15 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                 sheet.Range(address).NumberFormat = '0.00'
             sheet.Range('A51:AH55').UnMerge()
             sheet.Range('A51:AH55').Clear()
+            support_result=None
+            output_sheets=[sheet.Name]
+            if support_package:
+                from .supports import populate
+                extra,support_result=populate(wb,support_package,actions,project_name,subject_name)
+                output_sheets.extend(extra)
+            for sheet_name in reversed(output_sheets):
+                if wb.Worksheets(1).Name != sheet_name:
+                    wb.Worksheets(sheet_name).Move(wb.Worksheets(1))
             # English-only workbook metadata, including hidden historic sheets.
             # CELL(filename) otherwise introduces Chinese directory/file names.
             for ws in wb.Worksheets:
@@ -318,6 +334,16 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
             app.Calculation = -4105
             stiffness.Calculate()
             sheet.Calculate()
+            for sheet_name in output_sheets[1:]:
+                checked=wb.Worksheets(sheet_name)
+                checked.Calculate()
+                area=checked.Range(checked.PageSetup.PrintArea)
+                try:
+                    errors=area.SpecialCells(-4123,16)
+                except Exception:
+                    errors=None
+                if errors is not None:
+                    raise ValueError(f'{sheet_name}打印区域存在公式错误：{errors.Address}')
             # Only inspect the printed, applicable formula area; historic
             # hidden cases may contain unrelated errors and are not endorsed.
             values = sheet.Range('A1:AH50').Value2
@@ -331,16 +357,17 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                         if str(cell.Text) in EXCEL_ERRORS:
                             raise ValueError(f'输出公式错误：{cell.Address} {cell.Text}')
             wb.Save()
-            sheet.ExportAsFixedFormat(0, str(pdf.resolve()))
+            wb.ExportAsFixedFormat(0, str(pdf.resolve()))
         if sha256(template) != before:
             raise ValueError('原模板在生成期间变化，结果不能登记为有效')
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
                   'section_table_version': TABLE_VERSION,
                   'project_name': project_name, 'subject_name': subject_name, 'request': request, 'envelope': actions,
+                  'output_sheets':output_sheets, 'support_package_results':support_result,
                   'template_sha256': before, 'selected': selected, 'candidates': candidates,
                   'input_sha256': hashlib.sha256(json.dumps({'project_name': project_name, 'subject_name': subject_name, 'request': request}, ensure_ascii=False, sort_keys=True, allow_nan=False).encode('utf-8')).hexdigest(),
                   'workbook': str(target.resolve()), 'pdf': str(pdf.resolve()),
-                  'scope': 'Only continuous sheetpile shear and bending checks; no global stability, connection, or CAD approval.',
+                  'scope': ('Continuous sheetpile, template steel members, direct concentric welds and engineer-defined blinding checks; global stability and CAD pending.' if support_result else 'Only continuous sheetpile shear and bending checks; global stability, connections and CAD pending.'),
                   'historical_sheets': 'Original unrelated worksheets retained very hidden for formula preservation; excluded from delivered PDF and assessment.'}
         result['controlled_formula_updates'] = {
             'Stiffness for FREW-FSPIV!V35': '=P35*T35 (project reduction replaces historic layer-table dependency)',

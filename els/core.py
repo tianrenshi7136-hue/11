@@ -44,6 +44,10 @@ def validate(project):
     if sheetpile:
         from .sheetpile import validate_request
         errors.extend(validate_request(sheetpile))
+    support = project.get('support_design') or (sheetpile.get('support_package') if isinstance(sheetpile,dict) else None)
+    if isinstance(support,dict) and support.get('enabled'):
+        from .supports import validate_package
+        errors.extend(validate_package(support))
     if isinstance(members, list) and not members and sheetpile:
         return errors
     if not isinstance(members, list) or not members:

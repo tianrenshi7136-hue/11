@@ -65,3 +65,17 @@
 ```
 
 SQLite数据库位于data/projects.sqlite3。平面示意只显示构件坐标，不表达支撑连接和几何跨度，不能作为设计图。
+
+## 围檩、支撑、焊缝及 Blinding 联动生成
+
+在“围檩／支撑／焊缝／Blinding”页面勾选联动生成，并填写分析来源。每个构件／工况录入未乘1.4的 anchor force（kN/m）、荷载宽度、荷载跨度、角度、Lx、Ly、Kx、Ky及KLT，从原计算书截面库选择型号和钢材等级。支撑角度为与墙法线的夹角，直撑填0，角撑填写对应夹角。
+
+荷载跨度用于模板内力计算，Lx、Ly及K用于稳定验算，两者分别录入。软件保留模板的钢材厚度折减及验算公式，anchor force乘1.4一次，自重按模板另计。围檩与支撑目前验算指定型号，尚未自动选型。
+
+焊缝覆盖支撑／角撑—围檩、围檩—钢板桩直接无偏心角焊缝。填写焊脚与设计焊缝强度；支撑全周焊长由截面生成，围檩连接另填每米墙宽有效焊长和剪力分配长度。偏心焊缝群、托架及短撑连接尚未接入。
+
+Blinding采用工程师指定的`Structural capacity AA section.xlsx`中Blinding方法，修复结果比较引用，轴力取未分项钢板桩剪力包络乘1.4，有效长度取项目矩形基坑短边，厚度用户输入，fcu沿用20 MPa。它记录上述适用假设，尚未覆盖全部混凝土板、接触与连接验算。
+
+返回“指定截面验算”点击生成，同一本XLS与PDF增加Member Inputs、Member Summary、各构件验算、Weld Checks和Blinding Concrete。输入表、构件计算、汇总及焊缝之间保留Excel公式链接，修改输入可以重算；正式重新出成果应从软件生成新版本，以保持result.json与文件一致。任何构件、焊缝或Blinding不通过均停止本次完整成果生成。
+
+本机已登记钢板桩及Blinding源文件指纹。更换或修改模板后需重新审查登记；请勿直接删除指纹检查。验证脚本：`python -m tools.verify_supports_excel`、`python -m tools.verify_supports_failures`，须具备已登记的本地模板和桌面Excel。验证样例位于outputs/supports-validation，明确标注Software Validation Sample。

@@ -7,3 +7,5 @@
 
 当前Excel检查器只读取xlsx/xlsm结构，不执行计算、不修改模板。
 DWG的对象映射与实际出图操作须根据真实模板建立并在AutoCAD中验证。
+
+新增`supports-structure.local.json`仅保存在本机，记录工程师选用的Blinding文件及关键公式指纹。审查过的新版本可运行`python -m tools.register_supports_template --source "完整模板路径.xlsx"`重新登记；登记本身不替代计算方法审查。模板内容、登记文件、项目数据库和输出仍不提交GitHub。

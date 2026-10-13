@@ -1,0 +1,154 @@
+import os
+import tempfile
+import unittest
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+try:
+    from PySide6.QtWidgets import QApplication
+    from els.ui import Workbench, ProjectDetailsDialog
+except ImportError:
+    QApplication = None
+
+from test_core import valid_project
+from test_sheetpile import request as steel_request
+
+
+@unittest.skipIf(QApplication is None, "PySide6 not installed")
+class DesktopTests(unittest.TestCase):
+    def tearDown(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+        for widget in self.app.topLevelWidgets():
+            widget.close()
+            widget.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        self.app.processEvents()
+
+    def test_support_package_roundtrip_and_geometry_staleness(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'support.db')
+            p = valid_project()
+            p['sheetpile'] = steel_request()
+            package = {'enabled': True, 'source': 'TEST', 'members': [], 'welds': [], 'blinding_thickness_mm': 300}
+            p['support_design'] = package
+            window.load_form(p)
+            saved = window.collect()
+            self.assertEqual(saved['support_design']['blinding_thickness_mm'], 300)
+            self.assertTrue(saved['sheetpile']['support_package']['enabled'])
+            window.steel_result.setPlainText('Old output')
+            window.geometry['width_m'].setValue(7)
+            self.assertIn('修改', window.steel_result.toPlainText())
+            self.assertEqual(window.collect_support()['width_m'], 7)
+            window.close()
+
+    def test_project_subject_metadata_roundtrip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            dialog = ProjectDetailsDialog()
+            dialog.project_name.setText('  Example Project  ')
+            dialog.subject_name.setText('  Sheet Pile Check  ')
+            self.assertEqual(dialog.values(), ('Example Project', 'Sheet Pile Check'))
+            window = Workbench(Path(folder) / 'headers.db')
+            p = valid_project()
+            p['name'], p['subject_name'] = dialog.values()
+            window.load_form(p)
+            window.save()
+            saved = window.store.load(p['id'], 1)
+            self.assertEqual(saved['subject_name'], 'Sheet Pile Check')
+            self.assertEqual(window.subject.text(), 'Sheet Pile Check')
+            window.close()
+    def test_preselection_adoption_never_copies_reference_forces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'separate.db')
+            r = steel_request()
+            r.update(purpose='preselection', selection_mode='lightest', analysis_ei_knm2_per_m=None)
+            window.load_initial(r)
+            result = {'request': window.collect_initial(), 'selected': {'section': 'FSP VL', 'ei_knm2_per_m': 64575}, 'candidates': []}
+            window.initial_completed(result)
+            window.adopt_initial()
+            manual = window.collect_steel()
+            self.assertEqual(manual['section'], 'FSP VL')
+            self.assertEqual(manual['selection_mode'], 'manual')
+            self.assertEqual(manual['cases'], [])
+            self.assertEqual(manual['source'], '')
+            self.assertEqual(manual['analysis_ei_knm2_per_m'], 64575)
+            self.assertEqual(len(window.collect_initial()['cases']), 2)
+            window.close()
+
+    def test_legacy_auto_selection_moves_to_initial_only(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'legacy.db')
+            p = valid_project()
+            p['sheetpile'] = dict(steel_request(), selection_mode='lightest')
+            window.load_form(p)
+            self.assertEqual(window.collect_steel()['cases'], [])
+            self.assertEqual(len(window.collect_initial()['cases']), 2)
+            window.close()
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_form_save_and_preview(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / "test.db")
+            p = valid_project()
+            window.load_form(p)
+            self.assertEqual(window.collect(), p)
+            window.save()
+            self.assertIn("已保存版本 1", window.state.text())
+            window.geometry["length_m"].setValue(25)
+            window.refresh_preview()
+            self.assertEqual(window.preview.project["length_m"], 25)
+            window.save()
+            self.assertEqual(len(window.store.list_revisions()), 2)
+            window.prepare()
+            self.assertIn("尚未接入", window.report.toPlainText())
+            window.show()
+            self.app.processEvents()
+            self.assertFalse(window.grab().isNull())
+            window.close()
+
+    def test_section_selection_automates_properties_and_shared_factor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'section.db')
+            window.steel_section.setCurrentText('FSP IV')
+            window.steel_fields['stiffness_reduction'].setText('.5')
+            window.steel_fields['shear_reduction'].setText('.7')
+            r = window.collect_steel()
+            self.assertEqual(r['yield_strength_mpa'], 275)
+            self.assertEqual(r['analysis_ei_knm2_per_m'], 39565)
+            self.assertEqual(r['bending_reduction'], .7)
+            self.assertEqual(r['analysis_ei_origin'], 'section_table')
+            self.assertTrue(window.steel_fields['analysis_ei_knm2_per_m'].isReadOnly())
+            self.assertEqual(window.steel_properties.item(2, 5).text(), '38600')
+            window.steel_section.setCurrentText('FSPIII')
+            self.assertEqual(window.collect_steel()['analysis_ei_knm2_per_m'], 17220)
+            window.steel_fields['stiffness_reduction'].setText('invalid')
+            self.assertEqual(window.steel_fields['analysis_ei_knm2_per_m'].text(), '')
+            window.close()
+
+    def test_new_row_does_not_assume_zero_forces(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / "test.db")
+            window.add_row()
+            self.assertEqual(window.table.item(0, 7).text(), "")
+            with self.assertRaises(ValueError):
+                window.collect()
+            window.close()
+
+    def test_sheetpile_roundtrip_and_edits_expire_results(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'steel.db')
+            p = valid_project()
+            p['sheetpile'] = steel_request()
+            window.load_form(p)
+            self.assertEqual(window.collect()['sheetpile'], p['sheetpile'])
+            window.save()
+            self.assertEqual(window.store.load(p['id'], 1)['sheetpile'], p['sheetpile'])
+            window.steel_result.setPlainText('generated')
+            window.steel_fields['yield_strength_mpa'].setText('355')
+            self.assertIn('已过期', window.steel_result.toPlainText())
+            window.load_steel({})
+            window.add_steel_case()
+            self.assertIsNone(window.collect_steel()['cases'][0]['v_kn_per_m'])
+            window.close()

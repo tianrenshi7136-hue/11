@@ -25,6 +25,9 @@ def build_summary(wb,summary,package,member_sheets):
     copy_rows(source,summary,9,11,9)
     summary.Range('O10').Value2='Analysis output w (kN/m)'
     summary.Range('R10').Value2='Adopted w (kN/m)'
+    force_kn=package.get('schema_version')==2
+    if force_kn:
+        for cell,text in [('I10','Strut spacing (m)'),('O10','Normal force F (kN)'),('R10','Adopted F (kN)'),('U10','Design 1.4F (kN)')]:summary.Range(cell).Value2=text
     index_by_key={(m['member_id'],m['case']):i for i,m in enumerate(package['members'],9)}
     struts=[m for m in package['members'] if m['kind']=='Strut']
     walers=[m for m in package['members'] if m['kind']=='Waler']
@@ -38,6 +41,8 @@ def build_summary(wb,summary,package,member_sheets):
         for col,formula in [('D',f"='{member.Name}'!P11"),('I','='+data('P')),('L','='+data('V')),('O','='+data('M')),('R',f'=ABS(O{row})'),('U',f'=R{row}*1.4'),('X',f'=IF(AND(COUNT(I{row},L{row},R{row})=3,I{row}>0,L{row}>=0,L{row}<90),I{row}*U{row}/COS(RADIANS(L{row})),"INPUTS REQUIRED")'),('AC',f"='{member.Name}'!U36"),('AA',f'=IF(X{row}<=AC{row},"<=",">")'),('AF',f'=IF(COUNT(X{row},AC{row})<2,"CHECK INPUTS",IF(X{row}<=AC{row},"OK","NOT OK"))')]:
             set_formula(summary,f'{col}{row}',formula)
         member.Range('J11').Formula=f"='{summary.Name}'!X{row}"
+        if force_kn:
+            summary.Range(f'X{row}').Formula=f'=IF(AND(COUNT(I{row},L{row},R{row})=3,I{row}>0,L{row}>=0,L{row}<90),U{row}/COS(RADIANS(L{row})),"INPUTS REQUIRED")'
     heading=12+len(struts)+2
     copy_rows(source,summary,16,18,heading)
     summary.Range(f'AD{heading+1}').Value2='Capacity Mc (kNm)'
@@ -55,8 +60,19 @@ def build_summary(wb,summary,package,member_sheets):
                   'AD':f"='{member.Name}'!D36",'Q':f'=IF(O{row}<=R{row},"<=",">")','W':f'=IF(U{row}<=X{row},"<=",">")','AC':f'=IF(AA{row}<=AD{row},"<=",">")', 'AG':combined_status(member,row)}
         for col,formula in formulas.items():set_formula(summary,f'{col}{row}',formula)
         if editable:
+            if force_kn:
+                linked,_=member_sheets[(m['source_strut_id'],m['source_strut_case'])]
+                linked_row=member_sheets[(m['source_strut_id'],m['source_strut_case'])][1]['axial_summary_row']
+                summary.Range(f'H{row}').Formula=f"=ABS('{summary.Name}'!R{linked_row})/'{summary.Name}'!I{linked_row}"
+                summary.Range(f'K{row}').Formula=f"='{summary.Name}'!I{linked_row}"
             for cell,col in [('J11','O'),('J12','U'),('J13','AA')]:member.Range(cell).Formula=f"='{summary.Name}'!{col}{row}"
         else:
+            if force_kn:
+                axial_row=design['axial_summary_row']
+                summary.Range(f'H{row}').Formula=f"='{summary.Name}'!R{axial_row}"
+                summary.Range(f'K{row}').Formula=f"='{summary.Name}'!I{axial_row}"
+                if m.get('lx_is_default'):member.Range('J16').Formula=f"='{summary.Name}'!M{row}"
+                if m.get('lx_equals_ly'):member.Range('J18').Formula='=J16'
             member.Range('J12').Formula=f"=1.4*77*R15/10000*'{summary.Name}'!M{row}/2"
             member.Range('J13').Formula=f"=J12*'{summary.Name}'!M{row}/4"
     for row,m in enumerate(walers,start):action_row(m,row,True)
@@ -65,6 +81,10 @@ def build_summary(wb,summary,package,member_sheets):
         heading=last+3;copy_rows(source,summary,16,18,heading)
         summary.Range(f'B{heading}').Value2='III. Strut Shear and Moment Checks'
         summary.Range(f'AD{heading+1}').Value2='Capacity Mc (kNm)'
+        if force_kn:
+            summary.Range(f'H{heading+1}').Value2='Normal F (kN)'
+            summary.Range(f'K{heading+1}').Value2='Spacing (m)'
+            summary.Range(f'M{heading+1}').Value2='Strut length (m)'
         for row,m in enumerate(struts,heading+3):action_row(m,row,False)
         last=heading+2+len(struts)
     for row in range(12,last+1):

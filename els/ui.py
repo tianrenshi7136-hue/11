@@ -14,7 +14,8 @@ from .core import ProjectStore, export_project, import_project, new_project, val
 from .templates import inspect_excel, readiness
 from .sheetpile import SECTIONS, draft as sheetpile_draft, generate as generate_sheetpile, validate_request, preselect
 from .sections import properties, YIELD_MPA, E_KN_PER_MM2, TABLE_VERSION
-from .supports import MEMBER_FIELDS, WELD_FIELDS, section_library
+from .supports import section_library, migrate_package, generate_supports
+from .support_editor import SupportEditor
 
 ROOT = Path(__file__).resolve().parent.parent
 FIELDS = ["member_id", "kind", "case", "x_m", "y_m", "level_m", "effective_length_m", "n_kn", "m_knm", "v_kn", "value_basis", "force_basis"]
@@ -36,6 +37,16 @@ class SheetpileWorker(QThread):
             self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name, self.subject_name))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class SupportWorker(QThread):
+    completed=Signal(dict)
+    failed=Signal(str)
+    def __init__(self,package,project_name,subject_name,steel_request=None):
+        super().__init__();self.package=package;self.project_name=project_name;self.subject_name=subject_name;self.steel_request=steel_request
+    def run(self):
+        try:self.completed.emit(generate_supports(self.package,ROOT/'templates/sheetpile-structure.local.json',ROOT/'outputs/supports',self.project_name,self.subject_name,self.steel_request))
+        except Exception as exc:self.failed.emit(str(exc))
 
 
 class PreselectionWorker(QThread):
@@ -129,7 +140,7 @@ class Workbench(QMainWindow):
     def __init__(self, database=None):
         configure_fonts()
         super().__init__()
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.3")
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.4")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()
@@ -301,57 +312,21 @@ class Workbench(QMainWindow):
         steel_scroll.setWidget(steel)
         self.steel_flows.addTab(steel_scroll, '2 指定截面验算')
         tabs.addTab(steel_page, '钢板桩结构计算')
-        support_page=QWidget()
-        sl=QVBoxLayout(support_page)
-        self.support_enabled=QCheckBox('生成计算书时同时加入围檩、支撑、焊缝及Blinding工作表')
-        sl.addWidget(self.support_enabled)
-        sl.addWidget(QLabel('anchor force按未分项kN/m输入，Excel乘1.4一次。围檩按模板计算N/V/M；支撑考虑角度及模板自重。'))
-        self.support_source=QLineEdit()
-        self.support_source.setPlaceholderText('anchor force分析文件／版本（必填）')
-        sl.addWidget(self.support_source)
         try:
             self.support_sections=section_library()
         except Exception:
             self.support_sections=[]
-        self.support_members=QTableWidget(0,len(MEMBER_FIELDS))
-        self.support_members.setHorizontalHeaderLabels(['编号','工况','类型','截面','钢材等级','anchor kN/m','荷载宽度m','荷载跨度m','角度deg','Lx m','Ly m','Kx','Ky','KLT'])
-        self.support_members.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        sl.addWidget(self.support_members)
-        mb=QHBoxLayout()
-        for label,kind in [('增加支撑／角撑','Strut'),('增加围檩','Waler')]:
-            button=QPushButton(label)
-            button.clicked.connect(lambda checked=False,k=kind:self.add_support_member({'kind':k}))
-            mb.addWidget(button)
-        delete=QPushButton('删除选中构件')
-        delete.clicked.connect(lambda:self.delete_support_rows(self.support_members))
-        mb.addWidget(delete)
-        sl.addLayout(mb)
-        sl.addWidget(QLabel('角度以支撑与墙法线的夹角计；荷载跨度用于内力／自重，Lx、Ly及K用于构件稳定验算。'))
-        self.support_welds=QTableWidget(0,len(WELD_FIELDS))
-        self.support_welds.setHorizontalHeaderLabels(['构件编号','工况','连接类型','焊脚mm','焊缝强度MPa','有效焊长mm/m（围檩）','分配长度m（围檩）'])
-        self.support_welds.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        sl.addWidget(self.support_welds)
-        wb=QHBoxLayout()
-        add=QPushButton('增加焊缝连接')
-        add.clicked.connect(self.add_support_weld)
-        wb.addWidget(add)
-        delete=QPushButton('删除选中焊缝')
-        delete.clicked.connect(lambda:self.delete_support_rows(self.support_welds))
-        wb.addWidget(delete)
-        sl.addLayout(wb)
-        sl.addWidget(QLabel('只接入模板的直接、无偏心角焊缝。支撑全周有效焊长按截面生成；围檩焊长须按每米墙宽输入。'))
-        bf=QFormLayout()
-        self.blinding_thickness=QLineEdit()
-        self.blinding_thickness.setPlaceholderText('用户输入厚度mm；fcu沿用模板20 MPa')
-        bf.addRow('Blinding厚度 (mm)',self.blinding_thickness)
-        sl.addLayout(bf)
-        sl.addWidget(QLabel('Blinding轴力取钢板桩未分项剪力包络×1.4，有效长度取“项目与场地”的长宽短边。\n填写后到“指定截面验算”点击生成，将输出同一本Excel及多页PDF。'))
-        tabs.addTab(support_page,'围檩／支撑／焊缝／Blinding')
-        for table in (self.support_members,self.support_welds):
-            table.itemChanged.connect(self.steel_changed)
-        for edit in (self.support_source,self.blinding_thickness):
-            edit.textChanged.connect(self.steel_changed)
-        self.support_enabled.toggled.connect(self.steel_changed)
+        self.support_editor=SupportEditor(self.support_sections)
+        self.support_enabled=self.support_editor.combined
+        self.support_source=self.support_editor.source
+        self.support_welds=self.support_editor.welds
+        self.blinding_thickness=self.support_editor.thickness
+        self.support_result=self.support_editor.result
+        self.support_generate=self.support_editor.generate
+        self.support_editor.changed.connect(self.steel_changed)
+        self.support_editor.generate_requested.connect(self.generate_support_book)
+        tabs.addTab(self.support_editor,'围檩／支撑计算书')
+        self.support_worker=None
         self.initial_worker = None
         self.initial_selection = None
         self.steel_worker = None
@@ -381,7 +356,7 @@ class Workbench(QMainWindow):
         p.update({k: widget.value() for k, widget in self.geometry.items()})
         p["members"] = []
         p['sheetpile'] = self.collect_steel()
-        if self.support_enabled.isChecked() or 'support_design' in p:
+        if self.support_enabled.isChecked() or self.support_editor.struts.rowCount() or self.support_editor.walers.rowCount() or 'support_design' in p:
             p['support_design']=self.collect_support()
         initial = self.collect_initial()
         if initial or 'sheetpile_preselection' in p:
@@ -453,96 +428,44 @@ class Workbench(QMainWindow):
             r['support_package']=self.collect_support()
         return r
 
-    def support_row(self,table,fields,record,choices):
-        row=table.rowCount()
-        table.insertRow(row)
-        for col,key in enumerate(fields):
-            if key in choices:
-                combo=QComboBox()
-                combo.addItems(choices[key])
-                combo.setCurrentText(str(record.get(key,choices[key][0])))
-                combo.currentIndexChanged.connect(self.steel_changed)
-                table.setCellWidget(row,col,combo)
-            else:
-                value=record.get(key,1 if key in ('kx','ky','klt') else '')
-                table.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
-        self.steel_changed()
-
     def add_support_member(self,record=None):
         record=record if isinstance(record,dict) else {}
-        self.support_row(self.support_members,MEMBER_FIELDS,record,{'kind':['Strut','Waler'],
-            'section':['请选择']+self.support_sections,'grade':['请选择','S235','S275','S355','S460']})
+        self.support_editor.add_member(record.get('kind','Strut'),record)
 
     def add_support_weld(self,record=None):
-        record=record if isinstance(record,dict) else {}
-        self.support_row(self.support_welds,WELD_FIELDS,record,{'kind':['Strut-Waler','Waler-Sheetpile']})
-        combo=self.support_welds.cellWidget(self.support_welds.rowCount()-1,2)
-        combo.currentIndexChanged.connect(self.update_weld_fields)
-        self.update_weld_fields()
-
-    def update_weld_fields(self,*args):
-        for row in range(self.support_welds.rowCount()):
-            automatic=self.support_welds.cellWidget(row,2).currentText()=='Strut-Waler'
-            for col in (5,6):
-                item=self.support_welds.item(row,col)
-                if automatic:
-                    item.setText('自动' if col==5 else '不适用')
-                    item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                else:
-                    if item.text() in ('自动','不适用'):
-                        item.setText('')
-                    item.setFlags(item.flags() | Qt.ItemFlag.ItemIsEditable)
-
-    def delete_support_rows(self,table):
-        for row in sorted({i.row() for i in table.selectedIndexes()},reverse=True):
-            table.removeRow(row)
-        self.steel_changed()
-
-    def support_records(self,table,fields,text_fields):
-        records=[]
-        for row in range(table.rowCount()):
-            record={}
-            for col,key in enumerate(fields):
-                if table is self.support_welds and key in ('effective_length_mm','distribution_length_m') and table.cellWidget(row,2).currentText()=='Strut-Waler':
-                    record[key]=None
-                    continue
-                widget=table.cellWidget(row,col)
-                text=widget.currentText() if widget else table.item(row,col).text() if table.item(row,col) else ''
-                text=text.strip()
-                if key in text_fields:
-                    record[key]=text
-                else:
-                    try:
-                        record[key]=float(text) if text else None
-                    except ValueError:
-                        raise ValueError(f'构件／焊缝第{row+1}项{key}须为数字')
-            if record.get('kind')=='Waler':
-                record['angle_deg']=0.0
-            records.append(record)
-        return records
+        self.support_editor.add_weld(record if isinstance(record,dict) else {})
 
     def collect_support(self):
-        try:
-            thick=float(self.blinding_thickness.text()) if self.blinding_thickness.text().strip() else None
-        except ValueError:
-            raise ValueError('Blinding厚度须为数字')
-        return {'enabled':self.support_enabled.isChecked(),'source':self.support_source.text().strip(),
-            'members':self.support_records(self.support_members,MEMBER_FIELDS,set(MEMBER_FIELDS[:5])),
-            'welds':self.support_records(self.support_welds,WELD_FIELDS,set(WELD_FIELDS[:3])),
-            'length_m':self.geometry['length_m'].value(),'width_m':self.geometry['width_m'].value(),
-            'blinding_thickness_mm':thick}
+        return self.support_editor.collect(self.geometry['length_m'].value(),self.geometry['width_m'].value())
 
     def load_support(self,record):
-        self.support_enabled.setChecked(bool(record.get('enabled',False)))
-        self.support_source.setText(record.get('source',''))
-        thickness=record.get('blinding_thickness_mm')
-        self.blinding_thickness.setText('' if thickness is None else str(thickness))
-        self.support_members.setRowCount(0)
-        self.support_welds.setRowCount(0)
-        for m in record.get('members',[]):
-            self.add_support_member(m)
-        for w in record.get('welds',[]):
-            self.add_support_weld(w)
+        self.support_editor.load(migrate_package(record))
+
+    def generate_support_book(self):
+        def action():
+            if (self.steel_worker and self.steel_worker.isRunning()) or (self.support_worker and self.support_worker.isRunning()):
+                raise ValueError('请等待当前Excel生成完成')
+            package=self.collect_support();package['enabled']=True
+            steel=self.collect_steel() if package.get('include_blinding') else None
+            self.support_generate.setEnabled(False);self.steel_generate.setEnabled(False)
+            self.support_result.setPlainText('正在使用Excel生成围檩／支撑及焊缝计算书…')
+            self.support_worker=SupportWorker(package,self.name.text().strip(),self.subject.text().strip(),steel)
+            self.support_worker.completed.connect(self.support_completed)
+            self.support_worker.failed.connect(lambda message:self.support_result.setPlainText('生成未完成：\n'+message))
+            self.support_worker.finished.connect(lambda:self.support_generate.setEnabled(True))
+            self.support_worker.finished.connect(lambda:self.steel_generate.setEnabled(True))
+            self.support_worker.start()
+        self.guarded(action)
+
+    def support_completed(self,result):
+        try:
+            current=self.collect_support();current['enabled']=True
+            stale=current!=result['request'] or self.name.text().strip()!=result['project_name'] or self.subject.text().strip()!=result['subject_name']
+            if result.get('steel_request') is not None:stale=stale or self.collect_steel()!=result['steel_request']
+        except ValueError:stale=True
+        scope='围檩／支撑'+('及焊缝' if result['support_package_results']['welds'] else '')
+        self.support_result.setPlainText(('输入已修改，该成果已过期。\n' if stale else scope+'模板验算完成。\n')+f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n工作表：{', '.join(result['output_sheets'])}")
+        if not stale:self.state.setText('已生成围檩／支撑计算书及PDF；待工程师复核')
 
     def load_steel(self, request):
         self.steel_loading = True
@@ -709,6 +632,8 @@ class Workbench(QMainWindow):
         self.steel_changed()
 
     def steel_changed(self, *args):
+        if hasattr(self,'support_result') and self.support_result.toPlainText():
+            self.support_result.setPlainText('输入已修改，原生成结果已过期；请重新生成。')
         if hasattr(self, 'steel_result') and self.steel_result.toPlainText():
             self.steel_result.setPlainText('输入已修改，原生成结果已过期；请重新生成。')
 
@@ -743,13 +668,13 @@ class Workbench(QMainWindow):
         self.steel_result.setPlainText(f"型号：{s['section']}\n剪力利用率：{s['shear_utilization']:.3f}\n弯矩利用率：{s['moment_utilization']:.3f}\n" + ('型号或刚度与分析基准不同：须重新分析。\n' if s['requires_reanalysis'] else '分析模型与计算书共用Excel生成的EI。\n') + f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n本次生成范围以工作表清单为准；整体稳定及DWG生成尚未完成。")
         extra=result.get('support_package_results')
         if extra:
-            self.steel_result.append(f"新增工作表：{', '.join(result['output_sheets'][1:])}\n构件{len(extra['members'])}项、焊缝{len(extra['welds'])}项及Blinding模板验算通过；仍须工程师复核适用条件。")
+            self.steel_result.append(f"新增工作表：{', '.join(result['output_sheets'][1:])}\n构件{len(extra['members'])}项、焊缝{len(extra['welds'])}项模板验算通过；仍须工程师复核适用条件。")
 
     def steel_failed(self, message):
         self.steel_result.setPlainText('生成未完成：\n' + message)
 
     def closeEvent(self, event):
-        if (self.steel_worker is not None and self.steel_worker.isRunning()) or (self.initial_worker is not None and self.initial_worker.isRunning()):
+        if any(worker is not None and worker.isRunning() for worker in (self.steel_worker,self.initial_worker,self.support_worker)):
             QMessageBox.information(self, 'Excel正在生成', '请等待本次生成结束后再关闭窗口。')
             event.ignore()
         else:

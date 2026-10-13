@@ -45,10 +45,11 @@ def validate(project):
         from .sheetpile import validate_request
         errors.extend(validate_request(sheetpile))
     support = project.get('support_design') or (sheetpile.get('support_package') if isinstance(sheetpile,dict) else None)
-    if isinstance(support,dict) and support.get('enabled'):
+    has_support=isinstance(support,dict) and bool(support.get('members'))
+    if isinstance(support,dict) and (support.get('enabled') or has_support):
         from .supports import validate_package
         errors.extend(validate_package(support))
-    if isinstance(members, list) and not members and sheetpile:
+    if isinstance(members, list) and not members and (sheetpile or has_support):
         return errors
     if not isinstance(members, list) or not members:
         return errors + ["请录入至少一项构件／工况内力"]

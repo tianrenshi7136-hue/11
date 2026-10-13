@@ -1,11 +1,11 @@
 import json
+import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
-    QMessageBox, QPushButton, QSplitter, QTabWidget, QTableWidget, QTableWidgetItem,
+    QMessageBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
     QTextEdit, QVBoxLayout, QWidget)
 
 from .core import ProjectStore, export_project, import_project, new_project, validate
@@ -15,6 +15,17 @@ ROOT = Path(__file__).resolve().parent.parent
 FIELDS = ["member_id", "kind", "case", "x_m", "y_m", "level_m", "effective_length_m", "n_kn", "m_knm", "v_kn", "value_basis", "force_basis"]
 HEADERS = ["构件编号", "类型", "工况", "X (m)", "Y (m)", "标高 (m)", "有效长度 (m)", "轴力 (kN)", "弯矩 (kN·m)", "剪力 (kN)", "内力性质", "计量方式"]
 NUMERIC = set(FIELDS[3:10])
+
+
+def configure_fonts():
+    app = QApplication.instance()
+    if app is None:
+        return
+    font = Path(os.environ.get("SystemRoot", "C:/Windows")) / "Fonts" / "msyh.ttc"
+    if font.is_file() and "Microsoft YaHei" not in QFontDatabase.families():
+        QFontDatabase.addApplicationFont(str(font))
+    if "Microsoft YaHei" in QFontDatabase.families():
+        app.setFont(QFont("Microsoft YaHei", 10))
 
 
 class PlanPreview(QWidget):
@@ -52,6 +63,7 @@ class PlanPreview(QWidget):
 
 class Workbench(QMainWindow):
     def __init__(self, database=None):
+        configure_fonts()
         super().__init__()
         self.setWindowTitle("ELS 基坑支护模板工作台 · v0.1")
         self.resize(1250, 830)

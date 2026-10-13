@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+outputs/
+templates/*
+!templates/README.md
+*.xlsx
+*.xlsm
+*.xls
+*.dwg
+*.pdf

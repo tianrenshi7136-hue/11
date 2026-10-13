@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDia
 from .core import ProjectStore, export_project, import_project, new_project, validate
 from .templates import inspect_excel, readiness
 from .sheetpile import SECTIONS, draft as sheetpile_draft, generate as generate_sheetpile, validate_request
+from .sections import properties, YIELD_MPA, E_KN_PER_MM2, TABLE_VERSION
 
 ROOT = Path(__file__).resolve().parent.parent
 FIELDS = ["member_id", "kind", "case", "x_m", "y_m", "level_m", "effective_length_m", "n_kn", "m_knm", "v_kn", "value_basis", "force_basis"]
@@ -167,12 +168,23 @@ class Workbench(QMainWindow):
         self.steel_section.addItems(['请选择'] + SECTIONS)
         sf.addRow('钢板桩型号', self.steel_section)
         self.steel_fields = {}
-        for key, label in [('yield_strength_mpa', '屈服强度 (MPa)'), ('shear_reduction', '剪力折减系数 (0～1)'), ('bending_reduction', '弯矩折减系数 (0～1)'), ('stiffness_reduction', '刚度折减系数 (0～1)'), ('analysis_ei_knm2_per_m', '分析模型采用EI (kN·m²/m)'), ('source', '钢板桩分析文件／版本'), ('parameter_reference', '项目材料及折减参数依据')]:
+        for key, label in [('yield_strength_mpa', '自动材料强度 (MPa)'), ('shear_reduction', '设计折减系数（剪力／弯矩共用）'), ('stiffness_reduction', 'EI折减系数 Bd'), ('analysis_ei_knm2_per_m', '自动折减EI (kN·m²/m)'), ('source', '钢板桩分析文件／版本'), ('parameter_reference', '自动参数来源')]:
             edit = QLineEdit()
             edit.setPlaceholderText('必填，未提供时不使用旧项目默认值')
             self.steel_fields[key] = edit
             sf.addRow(label, edit)
+            if key in ('yield_strength_mpa', 'analysis_ei_knm2_per_m', 'parameter_reference'):
+                edit.setReadOnly(True)
+                edit.setStyleSheet('background:#eef3f8;')
+        self.steel_fields['bending_reduction'] = self.steel_fields['shear_reduction']
+        self.steel_properties = QTableWidget(3, 8)
+        self.steel_properties.setHorizontalHeaderLabels(['范围', 'w (mm)', 'h (mm)', 't (mm)', 'A', 'I', 'Z', 'm'])
+        self.steel_properties.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.steel_properties.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.steel_properties.setMaximumHeight(135)
         steel_layout.addLayout(sf)
+        steel_layout.addWidget(self.steel_properties)
+        steel_layout.addWidget(QLabel('每根：A cm²、I cm⁴、Z cm³、m kg/m；每米墙：A cm²/m、I cm⁴/m、Z cm³/m、m kg/m²。\nE=205 kN/mm²；分析模型直接采用Excel生成的EI，无需重复核对。'))
         self.steel_cases = QTableWidget(0, 3)
         self.steel_cases.setHorizontalHeaderLabels(['工况名称', '模型剪力 (kN/m)', '模型弯矩 (kN·m/m)'])
         self.steel_cases.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
@@ -195,6 +207,8 @@ class Workbench(QMainWindow):
             widget.textChanged.connect(self.steel_changed)
         self.steel_mode.currentIndexChanged.connect(self.steel_changed)
         self.steel_section.currentIndexChanged.connect(self.steel_changed)
+        self.steel_section.currentIndexChanged.connect(self.update_steel_properties)
+        self.steel_fields['stiffness_reduction'].textChanged.connect(self.update_steel_properties)
         self.steel_cases.itemChanged.connect(self.steel_changed)
         self.name.textChanged.connect(self.steel_changed)
         self.load_form(self.project)
@@ -241,7 +255,7 @@ class Workbench(QMainWindow):
         self.load_steel(p.get('sheetpile', {}))
 
     def collect_steel(self):
-        if self.steel_cases.rowCount() == 0 and self.steel_section.currentIndex() == 0 and self.steel_mode.currentIndex() == 0 and not any(w.text().strip() for w in self.steel_fields.values()):
+        if self.steel_cases.rowCount() == 0 and self.steel_section.currentIndex() == 0 and self.steel_mode.currentIndex() == 0 and not any(self.steel_fields[k].text().strip() for k in ('shear_reduction', 'stiffness_reduction', 'source')):
             return {}
         r = sheetpile_draft()
         r['selection_mode'] = self.steel_mode.currentData()
@@ -261,19 +275,61 @@ class Workbench(QMainWindow):
                 r['cases'].append({'name': cells[0], 'v_kn_per_m': float(cells[1]) if cells[1] else None, 'm_knm_per_m': float(cells[2]) if cells[2] else None})
             except ValueError:
                 raise ValueError(f'钢板桩第{row+1}工况内力须为数字')
+        if getattr(self, 'steel_ei_origin', None) == 'section_table':
+            r['analysis_ei_origin'] = 'section_table'
+            r['section_table_version'] = TABLE_VERSION
         return r
 
     def load_steel(self, request):
+        self.steel_loading = True
         r = sheetpile_draft()
         r.update(request or {})
         self.steel_mode.setCurrentIndex(1 if r['selection_mode'] == 'lightest' else 0)
         self.steel_section.setCurrentText(r['section'] or '请选择')
         for key, widget in self.steel_fields.items():
+            if key == 'bending_reduction':
+                continue
             widget.setText('' if r[key] is None else str(r[key]))
+        if r['shear_reduction'] != r['bending_reduction']:
+            self.steel_fields['shear_reduction'].clear()
+        self.steel_fields['yield_strength_mpa'].setText(str(YIELD_MPA))
+        if not self.steel_fields['parameter_reference'].text():
+            self.steel_fields['parameter_reference'].setText('工程师附表；E=205 kN/mm²；fy=275 MPa（已确认）；两项折减系数按项目输入')
+        self.steel_ei_origin = request.get('analysis_ei_origin') if request else None
+        self.steel_loading = False
+        if r['analysis_ei_knm2_per_m'] is None or self.steel_ei_origin == 'section_table':
+            self.update_steel_properties()
+        else:
+            self.update_steel_properties(preserve_model_ei=True)
         self.steel_cases.setRowCount(0)
         for case in r['cases']:
             self.add_steel_case(case)
         self.steel_result.clear()
+
+    def update_steel_properties(self, *args, preserve_model_ei=False):
+        if getattr(self, 'steel_loading', False):
+            return
+        self.steel_properties.clearContents()
+        section = self.steel_section.currentText()
+        if section not in SECTIONS:
+            if not preserve_model_ei:
+                self.steel_fields['analysis_ei_knm2_per_m'].clear()
+            return
+        p = properties(section)
+        rows = [('尺寸', p['width_mm'], p['height_mm'], p['thickness_mm'], '', '', '', ''),
+                ('每根', '', '', '', p['pile_area_cm2'], p['pile_inertia_cm4'], p['pile_modulus_cm3'], p['pile_mass_kg_per_m']),
+                ('每米墙', '', '', '', p['wall_area_cm2_per_m'], p['wall_inertia_cm4_per_m'], p['wall_modulus_cm3_per_m'], p['wall_mass_kg_per_m2'])]
+        for row, values in enumerate(rows):
+            for col, value in enumerate(values):
+                self.steel_properties.setItem(row, col, QTableWidgetItem(f'{value:g}' if isinstance(value, (int, float)) else value))
+        if not preserve_model_ei:
+            self.steel_ei_origin = 'section_table'
+            try:
+                bd = float(self.steel_fields['stiffness_reduction'].text())
+                ei = properties(section, bd)['reduced_ei_knm2_per_m']
+                self.steel_fields['analysis_ei_knm2_per_m'].setText(f'{ei:.12g}')
+            except ValueError:
+                self.steel_fields['analysis_ei_knm2_per_m'].clear()
 
     def add_steel_case(self, case=None):
         case = case if isinstance(case, dict) else {}
@@ -319,7 +375,7 @@ class Workbench(QMainWindow):
             self.steel_result.setPlainText('生成期间输入已修改，该成果已过期。')
             return
         s = result['selected']
-        self.steel_result.setPlainText(f"型号：{s['section']}\n剪力利用率：{s['shear_utilization']:.3f}\n弯矩利用率：{s['moment_utilization']:.3f}\n" + ('刚度与分析模型不同：须重新分析。\n' if s['requires_reanalysis'] else '刚度与输入的分析模型EI一致；仍须工程师复核。\n') + f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n仅连续墙剪力及弯矩，不代表整体稳定、节点或图纸已完成。")
+        self.steel_result.setPlainText(f"型号：{s['section']}\n剪力利用率：{s['shear_utilization']:.3f}\n弯矩利用率：{s['moment_utilization']:.3f}\n" + ('型号或刚度与分析基准不同：须重新分析。\n' if s['requires_reanalysis'] else '分析模型与计算书共用Excel生成的EI。\n') + f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n仅连续墙剪力及弯矩，不代表整体稳定、节点或图纸已完成。")
 
     def steel_failed(self, message):
         self.steel_result.setPlainText('生成未完成：\n' + message)

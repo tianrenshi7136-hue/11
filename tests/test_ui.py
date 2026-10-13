@@ -41,6 +41,25 @@ class DesktopTests(unittest.TestCase):
             self.assertFalse(window.grab().isNull())
             window.close()
 
+    def test_section_selection_automates_properties_and_shared_factor(self):
+        with tempfile.TemporaryDirectory() as folder:
+            window = Workbench(Path(folder) / 'section.db')
+            window.steel_section.setCurrentText('FSP IV')
+            window.steel_fields['stiffness_reduction'].setText('.5')
+            window.steel_fields['shear_reduction'].setText('.7')
+            r = window.collect_steel()
+            self.assertEqual(r['yield_strength_mpa'], 275)
+            self.assertEqual(r['analysis_ei_knm2_per_m'], 39565)
+            self.assertEqual(r['bending_reduction'], .7)
+            self.assertEqual(r['analysis_ei_origin'], 'section_table')
+            self.assertTrue(window.steel_fields['analysis_ei_knm2_per_m'].isReadOnly())
+            self.assertEqual(window.steel_properties.item(2, 5).text(), '38600')
+            window.steel_section.setCurrentText('FSPIII')
+            self.assertEqual(window.collect_steel()['analysis_ei_knm2_per_m'], 17220)
+            window.steel_fields['stiffness_reduction'].setText('invalid')
+            self.assertEqual(window.steel_fields['analysis_ei_knm2_per_m'].text(), '')
+            window.close()
+
     def test_new_row_does_not_assume_zero_forces(self):
         with tempfile.TemporaryDirectory() as folder:
             window = Workbench(Path(folder) / "test.db")

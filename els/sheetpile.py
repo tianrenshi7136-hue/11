@@ -10,8 +10,8 @@ import uuid
 
 from .core import finite
 from .templates import sha256
+from .sections import SECTIONS, ROWS, TABLE_VERSION, properties
 
-SECTIONS = ['FSP I', 'FSP II', 'FSPIII', 'FSP IV', 'FSP VL', 'FSP VIL']
 STATUS_FORMULA = '=IF(AND(X50>T50,M50>I50),"OK","NOT OK")'
 EXCEL_ERRORS = {'#REF!', '#DIV/0!', '#VALUE!', '#N/A', '#NAME?', '#NUM!', '#NULL!', '#SPILL!', '#CALC!', '#GETTING_DATA'}
 
@@ -118,6 +118,9 @@ def calculate_candidate(wb, section, request, actions):
     stiffness = wb.Worksheets('Stiffness for FREW-FSPIV')
     # Both sheets have independent dropdowns. Preserve their existing lookups.
     for ws in (sheet, stiffness):
+        # Update only the generation copy; existing VLOOKUPs remain authoritative
+        # calculations but now read the same engineer-supplied table as the UI.
+        ws.Range('AL9:AV14').Value2 = tuple(ROWS[name] for name in SECTIONS)
         ws.Range('J8').Value2 = section
         ws.Range('J16').Value2 = request['yield_strength_mpa']
     # Project parameters explicitly replace historic project constants.
@@ -224,7 +227,7 @@ def generate(request, mapping_path, output_root, project_name):
                 '分析来源：' + request['source'],
                 '项目材料及折减参数依据：' + request['parameter_reference'],
                 f"模型输出未乘1.4，模板乘1.4一次；控制工况 V:{actions['v_case']} / M:{actions['m_case']}",
-                f"分析模型EI={request['analysis_ei_knm2_per_m']:g}；选型后EI={selected['ei_knm2_per_m']:g} kN·m²/m。" + ('须外部重新分析。' if selected['requires_reanalysis'] else '与录入的分析模型刚度一致。'),
+                f"模型采用Excel生成EI={request['analysis_ei_knm2_per_m']:g}；选型后EI={selected['ei_knm2_per_m']:g} kN·m²/m。" + ('型号或刚度变化，须外部重新分析。' if selected['requires_reanalysis'] else '模型与计算书共用同一刚度来源。'),
             ]
             for row, note in enumerate(notes, 51):
                 cells = sheet.Range(f'A{row}:AH{row}')
@@ -265,6 +268,7 @@ def generate(request, mapping_path, output_root, project_name):
         if sha256(template) != before:
             raise ValueError('原模板在生成期间变化，结果不能登记为有效')
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
+                  'section_table_version': TABLE_VERSION,
                   'project_name': project_name, 'request': request, 'envelope': actions,
                   'template_sha256': before, 'selected': selected, 'candidates': candidates,
                   'input_sha256': hashlib.sha256(json.dumps({'project_name': project_name, 'request': request}, ensure_ascii=False, sort_keys=True, allow_nan=False).encode('utf-8')).hexdigest(),

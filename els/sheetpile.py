@@ -8,6 +8,7 @@ from pathlib import Path
 import shutil
 import uuid
 import tempfile
+import re
 
 from .core import finite
 from .templates import sha256
@@ -213,12 +214,16 @@ def preselect(request, mapping_path, output_root):
     return result
 
 
-def generate(request, mapping_path, output_root, project_name):
+def generate(request, mapping_path, output_root, project_name, subject_name='Continuous Sheet Pile Wall Structural Check'):
     if request.get('selection_mode') != 'manual' or request.get('purpose') == 'preselection':
         raise ValueError('计算书生成只验证指定型号；请在独立截面初选页面比较候选')
     actions = envelope(request)
     if not isinstance(project_name, str) or not project_name.strip():
         raise ValueError('项目名称不能为空')
+    if not isinstance(subject_name, str) or not subject_name.strip():
+        raise ValueError('Subject Name不能为空')
+    if re.search(r'[\u3400-\u9fff]', project_name + subject_name):
+        raise ValueError('Project Name和Subject Name请使用英文，不得含中文字符')
     mapping = json.loads(Path(mapping_path).read_text(encoding='utf-8'))
     template = Path(mapping['file'])
     before = sha256(template)
@@ -226,8 +231,8 @@ def generate(request, mapping_path, output_root, project_name):
         raise ValueError('模板指纹变化，请重新检查及登记模板')
     folder = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     folder.mkdir(parents=True, exist_ok=False)
-    target = folder / '钢板桩结构计算_待复核.xls'
-    pdf = folder / '钢板桩结构计算_待复核.pdf'
+    target = folder / 'Sheetpile_Structural_Check_Review.xls'
+    pdf = folder / 'Sheetpile_Structural_Check_Review.pdf'
     shutil.copy2(template, target)
     candidates = []
     try:
@@ -244,15 +249,15 @@ def generate(request, mapping_path, output_root, project_name):
             for ws in wb.Worksheets:
                 ws.Visible = -1 if ws.Name == 'FSPiv Summary' else 2
             sheet.Range('D3').Value2 = "'" + project_name
-            sheet.Range('D4').Value2 = f"连续钢板桩墙 | V:{actions['v_case']} M:{actions['m_case']}"
+            sheet.Range('D4').Value2 = "'" + subject_name
             for address in ('R3', 'V3', 'AB3', 'AG3', 'V4', 'AB4'):
                 sheet.Range(address).MergeArea.ClearContents()
             sheet.Range('B48').Formula = '=J8'
-            sheet.Range('B50').Value2 = '模型内力绝对值包络'
+            sheet.Range('B50').Value2 = 'Model Action Envelope'
             sheet.Range('J45').Value2 = 'kNm/m'
             sheet.Range('I48').Value2 = '1.4V (kN/m)'
             sheet.Range('T48').Value2 = '1.4M (kNm/m)'
-            sheet.Range('Q48').Value2 = '模型弯矩 (kNm/m)'
+            sheet.Range('Q48').Value2 = 'Model Moment (kNm/m)'
             sheet.Range('M49').Value2 = '(kN/m)'
             sheet.Range('X49').Value2 = '(kNm/m)'
             stiffness = wb.Worksheets('Stiffness for FREW-FSPIV')
@@ -267,32 +272,49 @@ def generate(request, mapping_path, output_root, project_name):
             sheet.Rows('34:34').Hidden = True
             for address in ('F50', 'Q50', 'I50', 'T50', 'M50', 'X50'):
                 sheet.Range(address).NumberFormat = '0.00'
-            notes = [
-                '适用范围：仅连续钢板桩墙剪力及弯矩验算，待工程师复核；未包含整体稳定、节点或图纸。',
-                '分析来源：' + request['source'],
-                '项目材料及折减参数依据：' + request['parameter_reference'],
-                f"模型输出未乘1.4，模板乘1.4一次；控制工况 V:{actions['v_case']} / M:{actions['m_case']}",
-                f"模型采用Excel生成EI={request['analysis_ei_knm2_per_m']:g}；选型后EI={selected['ei_knm2_per_m']:g} kN·m²/m。" + ('型号或刚度变化，须外部重新分析。' if selected['requires_reanalysis'] else '模型与计算书共用同一刚度来源。'),
-            ]
-            for row, note in enumerate(notes, 51):
-                cells = sheet.Range(f'A{row}:AH{row}')
-                cells.UnMerge()
-                cells.Clear()
-                cells.Merge()
-                cells.Value2 = note
-                cells.WrapText = True
-                cells.Font.Name = 'Microsoft YaHei'
-                cells.Font.Size = 9
-                cells.VerticalAlignment = -4108
-                sheet.Rows(f'{row}:{row}').RowHeight = 30
-            sheet.Rows('51:55').Hidden = False
-            sheet.Range('A55:AH55').Borders(9).LineStyle = 1
-            sheet.PageSetup.PrintArea = '$A$1:$AH$55'
+            sheet.Range('A51:AH55').UnMerge()
+            sheet.Range('A51:AH55').Clear()
+            # English-only workbook metadata, including hidden historic sheets.
+            # CELL(filename) otherwise introduces Chinese directory/file names.
+            for ws in wb.Worksheets:
+                used = ws.UsedRange
+                formulas = used.Formula
+                row_start, col_start = used.Row, used.Column
+                if isinstance(formulas, tuple):
+                    for ri, row_values in enumerate(formulas):
+                        for ci, formula in enumerate(row_values):
+                            if isinstance(formula, str) and 'CELL("FILENAME"' in formula.upper():
+                                ws.Cells(row_start+ri, col_start+ci).Value2 = f'OUTPUT/[{target.name}]{ws.Name}'
+                ws.PageSetup.LeftHeader = ''
+                ws.PageSetup.RightHeader = ''
+                ws.PageSetup.CenterHeader = 'REVIEW DRAFT'
+                ws.PageSetup.LeftFooter = ''
+                ws.PageSetup.RightFooter = ''
+                ws.PageSetup.CenterFooter = ''
+            # Replace the bilingual header picture; retain the FSP section sketch.
+            for index in range(sheet.Shapes.Count, 0, -1):
+                shape = sheet.Shapes.Item(index)
+                if shape.Type in (11, 13) and shape.TopLeftCell.Row <= 2:
+                    shape.Delete()
+            header = sheet.Range('A2:AH2')
+            header.UnMerge()
+            header.Merge()
+            header.Value2 = 'STRUCTURAL CALCULATIONS'
+            header.Font.Name = 'Arial'
+            header.Font.Bold = True
+            header.HorizontalAlignment = -4108
+            for edge in (7, 8, 9, 10):
+                border = sheet.Range('A1:AH50').Borders(edge)
+                border.LineStyle = 1
+                border.Weight = 4  # xlThick outside border
+            sheet.PageSetup.PrintArea = '$A$1:$AH$50'
             sheet.PageSetup.Zoom = False
             sheet.PageSetup.FitToPagesWide = 1
             sheet.PageSetup.FitToPagesTall = 1
-            sheet.PageSetup.CenterHeader = '待工程师复核 / REVIEW DRAFT'
-            sheet.PageSetup.CenterFooter = '刚度变化，须重新分析' if selected['requires_reanalysis'] else '仅连续钢板桩剪力及弯矩验算'
+            for margin in ('LeftMargin', 'RightMargin', 'TopMargin', 'BottomMargin'):
+                setattr(sheet.PageSetup, margin, app.InchesToPoints(.25))
+            sheet.PageSetup.HeaderMargin = app.InchesToPoints(.1)
+            sheet.PageSetup.FooterMargin = app.InchesToPoints(.1)
             app.Calculation = -4105
             stiffness.Calculate()
             sheet.Calculate()
@@ -314,9 +336,9 @@ def generate(request, mapping_path, output_root, project_name):
             raise ValueError('原模板在生成期间变化，结果不能登记为有效')
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
                   'section_table_version': TABLE_VERSION,
-                  'project_name': project_name, 'request': request, 'envelope': actions,
+                  'project_name': project_name, 'subject_name': subject_name, 'request': request, 'envelope': actions,
                   'template_sha256': before, 'selected': selected, 'candidates': candidates,
-                  'input_sha256': hashlib.sha256(json.dumps({'project_name': project_name, 'request': request}, ensure_ascii=False, sort_keys=True, allow_nan=False).encode('utf-8')).hexdigest(),
+                  'input_sha256': hashlib.sha256(json.dumps({'project_name': project_name, 'subject_name': subject_name, 'request': request}, ensure_ascii=False, sort_keys=True, allow_nan=False).encode('utf-8')).hexdigest(),
                   'workbook': str(target.resolve()), 'pdf': str(pdf.resolve()),
                   'scope': 'Only continuous sheetpile shear and bending checks; no global stability, connection, or CAD approval.',
                   'historical_sheets': 'Original unrelated worksheets retained very hidden for formula preservation; excluded from delivered PDF and assessment.'}

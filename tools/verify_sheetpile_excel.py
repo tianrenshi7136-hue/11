@@ -36,7 +36,7 @@ with excel_session(scratch) as (app, wb):
     assert abs(result['ei_knm2_per_m'] - 79130 * .35) < 1e-6
     results.append(result)
 scratch.unlink()
-output = generate(request, mapping, root / 'outputs/sheetpile-validation', '软件验证样例（非新项目设计）')
+output = generate(request, mapping, root / 'outputs/sheetpile-validation', 'Software Validation Sample - Not a Project Design')
 failed = copy.deepcopy(request)
 failed['cases'][0].update(v_kn_per_m=1e8, m_knm_per_m=1e8)
 failure_root = root / 'outputs/sheetpile-failure-validation'

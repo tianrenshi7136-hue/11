@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtWidgets import QApplication
-    from els.ui import Workbench
+    from els.ui import Workbench, ProjectDetailsDialog
 except ImportError:
     QApplication = None
 
@@ -17,6 +17,21 @@ from test_sheetpile import request as steel_request
 
 @unittest.skipIf(QApplication is None, "PySide6 not installed")
 class DesktopTests(unittest.TestCase):
+    def test_project_subject_metadata_roundtrip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            dialog = ProjectDetailsDialog()
+            dialog.project_name.setText('  Example Project  ')
+            dialog.subject_name.setText('  Sheet Pile Check  ')
+            self.assertEqual(dialog.values(), ('Example Project', 'Sheet Pile Check'))
+            window = Workbench(Path(folder) / 'headers.db')
+            p = valid_project()
+            p['name'], p['subject_name'] = dialog.values()
+            window.load_form(p)
+            window.save()
+            saved = window.store.load(p['id'], 1)
+            self.assertEqual(saved['subject_name'], 'Sheet Pile Check')
+            self.assertEqual(window.subject.text(), 'Sheet Pile Check')
+            window.close()
     def test_preselection_adoption_never_copies_reference_forces(self):
         with tempfile.TemporaryDirectory() as folder:
             window = Workbench(Path(folder) / 'separate.db')

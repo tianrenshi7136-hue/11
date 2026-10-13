@@ -7,7 +7,8 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (QApplication, QComboBox, QDoubleSpinBox, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow,
     QMessageBox, QPushButton, QTabWidget, QTableWidget, QTableWidgetItem,
-    QTextEdit, QVBoxLayout, QWidget, QScrollArea)
+    QTextEdit, QVBoxLayout, QWidget, QScrollArea, QDialog, QDialogButtonBox)
+import re
 
 from .core import ProjectStore, export_project, import_project, new_project, validate
 from .templates import inspect_excel, readiness
@@ -24,13 +25,14 @@ class SheetpileWorker(QThread):
     completed = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, request, project_name):
+    def __init__(self, request, project_name, subject_name):
         super().__init__()
         self.request, self.project_name = request, project_name
+        self.subject_name = subject_name
 
     def run(self):
         try:
-            self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name))
+            self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name, self.subject_name))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -48,6 +50,34 @@ class PreselectionWorker(QThread):
             self.completed.emit(preselect(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile-preselection'))
         except Exception as exc:
             self.failed.emit(str(exc))
+
+
+class ProjectDetailsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle('Project Setup')
+        self.resize(560, 190)
+        form = QFormLayout(self)
+        self.project_name = QLineEdit()
+        self.subject_name = QLineEdit()
+        self.project_name.setPlaceholderText('Enter Project Name in English')
+        self.subject_name.setPlaceholderText('Enter Subject Name in English')
+        form.addRow('Project Name', self.project_name)
+        form.addRow('Subject Name', self.subject_name)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        form.addRow(buttons)
+
+    def accept(self):
+        values = self.values()
+        if not all(values) or re.search(r'[\u3400-\u9fff]', ''.join(values)):
+            QMessageBox.warning(self, 'Project Setup', 'Both names are required and must not contain Chinese characters.')
+            return
+        super().accept()
+
+    def values(self):
+        return self.project_name.text().strip(), self.subject_name.text().strip()
 
 
 def configure_fonts():
@@ -122,7 +152,9 @@ class Workbench(QMainWindow):
         basic = QWidget()
         form = QFormLayout(basic)
         self.name = QLineEdit()
-        form.addRow("项目名称", self.name)
+        form.addRow('Project Name', self.name)
+        self.subject = QLineEdit()
+        form.addRow('Subject Name', self.subject)
         self.geometry = {}
         for key, label in [("length_m", "基坑长度 (m)"), ("width_m", "基坑宽度 (m)"), ("depth_m", "开挖深度 (m)"), ("embedment_m", "钢板桩入土深度 (m)")]:
             spin = QDoubleSpinBox()
@@ -279,6 +311,7 @@ class Workbench(QMainWindow):
         self.steel_fields['stiffness_reduction'].textChanged.connect(self.update_steel_properties)
         self.steel_cases.itemChanged.connect(self.steel_changed)
         self.name.textChanged.connect(self.steel_changed)
+        self.subject.textChanged.connect(self.steel_changed)
         self.load_form(self.project)
 
     def guarded(self, action):
@@ -290,6 +323,7 @@ class Workbench(QMainWindow):
     def collect(self):
         p = dict(self.project)
         p.update(name=self.name.text().strip(), analysis_reference=self.analysis.text().strip(), site_notes=self.site.toPlainText(), external_checks=self.external.toPlainText(), template_manifest=self.manifest.text().strip())
+        p['subject_name'] = self.subject.text().strip()
         p.update({k: widget.value() for k, widget in self.geometry.items()})
         p["members"] = []
         p['sheetpile'] = self.collect_steel()
@@ -311,6 +345,7 @@ class Workbench(QMainWindow):
     def load_form(self, p):
         self.project = p
         self.name.setText(p["name"])
+        self.subject.setText(p.get('subject_name', ''))
         self.analysis.setText(p["analysis_reference"])
         self.site.setPlainText(p["site_notes"])
         self.external.setPlainText(p["external_checks"])
@@ -535,9 +570,11 @@ class Workbench(QMainWindow):
                 raise ValueError('\n'.join(errors))
             if not self.name.text().strip():
                 raise ValueError('请填写项目名称')
+            if not self.subject.text().strip() or re.search(r'[\u3400-\u9fff]', self.name.text() + self.subject.text()):
+                raise ValueError('请填写英文Project Name和Subject Name')
             self.steel_generate.setEnabled(False)
             self.steel_result.setPlainText('正在使用Excel重算并生成独立副本…')
-            self.steel_worker = SheetpileWorker(request, self.name.text().strip())
+            self.steel_worker = SheetpileWorker(request, self.name.text().strip(), self.subject.text().strip())
             self.steel_worker.completed.connect(self.steel_completed)
             self.steel_worker.failed.connect(self.steel_failed)
             self.steel_worker.finished.connect(lambda: self.steel_generate.setEnabled(True))
@@ -546,7 +583,7 @@ class Workbench(QMainWindow):
 
     def steel_completed(self, result):
         try:
-            if self.collect_steel() != result['request'] or self.name.text().strip() != result['project_name']:
+            if self.collect_steel() != result['request'] or self.name.text().strip() != result['project_name'] or self.subject.text().strip() != result.get('subject_name', ''):
                 self.steel_result.setPlainText('生成期间输入已修改，该成果已过期。\n' + result['workbook'])
                 return
         except ValueError:
@@ -587,7 +624,11 @@ class Workbench(QMainWindow):
     def new(self):
         answer = QMessageBox.question(self, "新建项目", "未保存的修改将丢失，确定新建？")
         if answer == QMessageBox.StandardButton.Yes:
-            self.load_form(new_project())
+            dialog = ProjectDetailsDialog(self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                p = new_project()
+                p['name'], p['subject_name'] = dialog.values()
+                self.load_form(p)
 
     def save(self):
         def action():
@@ -665,5 +706,11 @@ def main():
     app.setStyle("Fusion")
     app.setStyleSheet("QPushButton { padding:7px; } QLineEdit,QDoubleSpinBox { padding:5px; } QTabWidget::pane { border:1px solid #cbd5e1; }")
     window = Workbench()
+    dialog = ProjectDetailsDialog()
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return 0
+    p = new_project()
+    p['name'], p['subject_name'] = dialog.values()
+    window.load_form(p)
     window.show()
     return app.exec()

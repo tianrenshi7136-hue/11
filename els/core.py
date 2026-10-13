@@ -12,7 +12,7 @@ from pathlib import Path
 
 def new_project():
     return {
-        "schema_version": 1, "id": str(uuid.uuid4()), "name": "新基坑项目",
+        "schema_version": 1, "id": str(uuid.uuid4()), "name": "新基坑项目", "subject_name": '',
         "length_m": 0.0, "width_m": 0.0, "depth_m": 0.0,
         "embedment_m": 0.0, "analysis_reference": "", "site_notes": "",
         "external_checks": "", "members": [], "template_manifest": "",

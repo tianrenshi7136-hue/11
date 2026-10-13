@@ -13,6 +13,11 @@ def request():
 
 
 class SheetpileTests(unittest.TestCase):
+    def test_english_headers_required_before_creating_outputs(self):
+        with self.assertRaisesRegex(ValueError, '不得含中文'):
+            generate(request(), 'not-read.json', 'not-created', '中文项目', 'Subject')
+        with self.assertRaisesRegex(ValueError, 'Subject Name'):
+            generate(request(), 'not-read.json', 'not-created', 'Project', '')
     def test_preselection_has_no_analysis_baseline_and_cannot_generate(self):
         r = request()
         r.update(purpose='preselection', selection_mode='lightest', analysis_ei_knm2_per_m=None)

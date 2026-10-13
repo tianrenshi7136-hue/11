@@ -29,6 +29,9 @@
 
 本项目电脑已建立 `.venv`；双击根目录的 `启动软件.cmd`。
 
+启动时先弹出Project Setup，填写英文Project Name及Subject Name后进入工作台。这两项随项目版本保存，可在“项目与场地”修改，并直接写入生成计算书的Project／Subject栏。
+生成Excel使用英文文件名和表格内容，去除末尾五行说明，打印范围为A1:AH50，采用粗外框、0.25英寸窄页边距及自动适配单页。参数来源、控制工况等追溯资料仍保存在result.json。
+
 其他Windows电脑先安装Python 3.12或更新版本，在项目目录执行：
 
 ```powershell

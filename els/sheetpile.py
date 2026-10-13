@@ -319,18 +319,8 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
             header.Font.Name = 'Arial'
             header.Font.Bold = True
             header.HorizontalAlignment = -4108
-            for edge in (7, 8, 9, 10):
-                border = sheet.Range('A1:AH50').Borders(edge)
-                border.LineStyle = 1
-                border.Weight = 4  # xlThick outside border
-            sheet.PageSetup.PrintArea = '$A$1:$AH$50'
-            sheet.PageSetup.Zoom = False
-            sheet.PageSetup.FitToPagesWide = 1
-            sheet.PageSetup.FitToPagesTall = 1
-            for margin in ('LeftMargin', 'RightMargin', 'TopMargin', 'BottomMargin'):
-                setattr(sheet.PageSetup, margin, app.InchesToPoints(.25))
-            sheet.PageSetup.HeaderMargin = app.InchesToPoints(.1)
-            sheet.PageSetup.FooterMargin = app.InchesToPoints(.1)
+            from .printing import setup_print
+            setup_print(sheet,50,app)
             app.Calculation = -4105
             stiffness.Calculate()
             sheet.Calculate()

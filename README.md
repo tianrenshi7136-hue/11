@@ -30,7 +30,7 @@
 本项目电脑已建立 `.venv`；双击根目录的 `启动软件.cmd`。
 
 启动时先弹出Project Setup，填写英文Project Name及Subject Name后进入工作台。这两项随项目版本保存，可在“项目与场地”修改，并直接写入生成计算书的Project／Subject栏。
-生成Excel使用英文文件名和表格内容，去除末尾五行说明，打印范围为A1:AH50，采用粗外框、0.25英寸窄页边距及自动适配单页。参数来源、控制工况等追溯资料仍保存在result.json。
+生成Excel使用英文文件名和表格内容，去除末尾五行说明，内容下方预留两行空白再画粗外框，采用水平及垂直打印居中、0.25英寸窄页边距及自动适配单页。参数来源、控制工况等追溯资料仍保存在result.json。
 
 其他Windows电脑先安装Python 3.12或更新版本，在项目目录执行：
 
@@ -76,6 +76,6 @@ SQLite数据库位于data/projects.sqlite3。平面示意只显示构件坐标�
 
 Blinding采用工程师指定的`Structural capacity AA section.xlsx`中Blinding方法，修复结果比较引用，轴力取未分项钢板桩剪力包络乘1.4，有效长度取项目矩形基坑短边，厚度用户输入，fcu沿用20 MPa。它记录上述适用假设，尚未覆盖全部混凝土板、接触与连接验算。
 
-返回“指定截面验算”点击生成，同一本XLS与PDF增加Member Inputs、Member Summary、各构件验算、Weld Checks和Blinding Concrete。输入表、构件计算、汇总及焊缝之间保留Excel公式链接，修改输入可以重算；正式重新出成果应从软件生成新版本，以保持result.json与文件一致。任何构件、焊缝或Blinding不通过均停止本次完整成果生成。
+返回“指定截面验算”点击生成，同一本XLS与PDF增加Strut & Wailing Summary、各构件验算、Connection Checks和Blinding Concrete。取消独立参数总结页；内力汇总采用原Strut&Wailing Summary的分区表格，焊缝采用原Connection check的展开式计算。汇总、构件计算及焊缝之间保留Excel公式链接，修改输入可以重算；正式重新出成果应从软件生成新版本，以保持result.json与文件一致。任何构件、焊缝或Blinding不通过均停止本次完整成果生成。
 
 本机已登记钢板桩及Blinding源文件指纹。更换或修改模板后需重新审查登记；请勿直接删除指纹检查。验证脚本：`python -m tools.verify_supports_excel`、`python -m tools.verify_supports_failures`，须具备已登记的本地模板和桌面Excel。验证样例位于outputs/supports-validation，明确标注Software Validation Sample。

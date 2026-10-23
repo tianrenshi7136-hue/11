@@ -18,6 +18,22 @@ STATUS_FORMULA = '=IF(AND(X50>T50,M50>I50),"OK","NOT OK")'
 EXCEL_ERRORS = {'#REF!', '#DIV/0!', '#VALUE!', '#N/A', '#NAME?', '#NUM!', '#NULL!', '#SPILL!', '#CALC!', '#GETTING_DATA'}
 
 
+def excel_call(action):
+    """Excel can briefly reject automation calls while finishing a save/export."""
+    import pythoncom,pywintypes,time
+    for attempt in range(24):
+        try:return action()
+        except pywintypes.com_error as exc:
+            if exc.hresult not in (-2147418111,-2147417846) or attempt==23:raise
+            pythoncom.PumpWaitingMessages();time.sleep(.25)
+
+
+def save_and_export(wb,pdf):
+    excel_call(wb.__dict__.get('_els_save',lambda:wb.Save()))
+    export=wb.__dict__.get('_els_export')
+    excel_call(lambda:export(0,str(pdf)) if export else wb.ExportAsFixedFormat(0,str(pdf)))
+
+
 def draft():
     return {'selection_mode': 'manual', 'section': '', 'yield_strength_mpa': None,
             'shear_reduction': None, 'bending_reduction': None, 'stiffness_reduction': None,
@@ -90,8 +106,11 @@ def excel_session(path):
     pythoncom.CoInitialize()
     app = None
     wb = None
+    close_book = None
+    quit_app = None
     try:
         app = win32com.client.DispatchEx('Excel.Application')
+        quit_app = app.Quit
         app.Visible = False
         app.DisplayAlerts = False
         app.EnableEvents = False
@@ -101,21 +120,22 @@ def excel_session(path):
         app.Calculation = -4135
         try:
             wb = app.Workbooks.Open(str(Path(path).resolve()), UpdateLinks=0, ReadOnly=False, AddToMru=False)
+            close_book = wb.Close
+            # Bind these while Excel is idle. Late-bound type lookup itself can
+            # fail during the short busy interval after Save/Export.
+            wb.__dict__['_els_save']=wb.Save
+            wb.__dict__['_els_export']=wb.ExportAsFixedFormat
         except Exception as exc:
             raise ValueError(f'Excel 无法打开工作副本：{Path(path).resolve()}。这是文件读取失败，尚未执行验算。\n{exc}') from exc
         yield app, wb
     finally:
         try:
-            if wb is not None:
-                try:wb.Close(SaveChanges=False)
-                except AttributeError:
-                    # A late-bound Excel wrapper can lose Close after export.
-                    # Quit below still disposes this private Excel instance.
-                    pass
+            if close_book is not None:
+                excel_call(lambda:close_book(SaveChanges=False))
         finally:
             try:
-                if app is not None:
-                    app.Quit()
+                if quit_app is not None:
+                    excel_call(quit_app)
             finally:
                 pythoncom.CoUninitialize()
 
@@ -360,8 +380,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
             detach_external_links(wb,output_sheets)
             from .printing import format_check_results
             for name in output_sheets:format_check_results(wb.Worksheets(name))
-            wb.Save()
-            wb.ExportAsFixedFormat(0, str(pdf.resolve()))
+            save_and_export(wb,pdf.resolve())
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
                   'section_table_version': TABLE_VERSION,
                   'project_name': project_name, 'subject_name': subject_name, 'request': request, 'envelope': actions,

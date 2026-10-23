@@ -4,7 +4,8 @@ class SupportsTests(unittest.TestCase):
  def member(self):
   return dict(member_id='S1',case='LC1',kind='Strut',section='152x152x37',grade='S355',anchor_kn_per_m=90,load_width_m=3.5,load_span_m=2.5,angle_deg=45,lx_m=2.5,ly_m=2.5,kx=1,ky=1,klt=1)
  def package(self):
-  return dict(source='TEST',members=[self.member()],welds=[dict(member_id='S1',case='LC1',kind='Strut-Waler',leg_mm=8,strength_mpa=220)],length_m=10,width_m=5,blinding_thickness_mm=300)
+  w=self.member();w.update(member_id='W1',kind='Waler',angle_deg=0,source_strut_id='S1',source_strut_case='LC1')
+  return dict(source='TEST',members=[self.member(),w],welds=[dict(member_id='S1',case='LC1',kind='Strut-Waler',leg_mm=8,strength_mpa=220)],length_m=10,width_m=5,blinding_thickness_mm=300)
  def test_strut_unfactored_per_metre_once_and_selfweight(self):
   a=member_actions(self.member(),47.1)
   self.assertAlmostEqual(a['n'],623.668181)

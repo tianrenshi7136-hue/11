@@ -48,10 +48,10 @@ class SupportEditor(QWidget):
   # Legacy rows remain available for import/backward compatibility, not manual entry.
   self.welds=QTableWidget(0,len(WELD_FIELDS));self.welds.hide();self.welds.itemChanged.connect(self.emit_changed)
   page=QWidget();pl=QVBoxLayout(page);pl.setContentsMargins(12,12,12,12);pl.setSpacing(14)
-  note=QLabel('每类连接填写一组参数。自动取全部已录入构件及工况中的最大设计内力，计算书显示控制构件；无需填写连接构件编号。');note.setWordWrap(True);pl.addWidget(note)
+  note=QLabel('每类连接填写一组参数。支撑／角撑—围檩焊缝取关联围檩的最大设计剪力 V，支撑截面用于确定焊长；计算书显示控制构件及工况，无需填写连接构件编号。');note.setWordWrap(True);pl.addWidget(note)
   cards=QHBoxLayout();cards.setSpacing(18);self.connection_controls={}
   for kind,title in [('Strut-Waler','支撑 / 角撑 — 围檩'),('Waler-Sheetpile','围檩 — 钢板桩')]:
-   box=QGroupBox(title);bf=QFormLayout(box);bf.setSpacing(12);controls={};enabled=QCheckBox('自动检查最大设计轴力' if kind=='Strut-Waler' else '自动检查最大设计剪力');controls['enabled']=enabled;bf.addRow(enabled)
+   box=QGroupBox(title);bf=QFormLayout(box);bf.setSpacing(12);controls={};enabled=QCheckBox('按关联围檩最大设计剪力检查' if kind=='Strut-Waler' else '自动检查最大设计剪力');controls['enabled']=enabled;bf.addRow(enabled)
    fields=[('leg_mm','焊脚（mm）'),('strength_mpa','焊缝强度（MPa）')]+([('effective_length_mm','每米墙宽总有效焊长（mm/m）'),('distribution_length_m','统一分配长度（m）')] if kind=='Waler-Sheetpile' else [])
    for key,label in fields:
     field=QLineEdit();field.setPlaceholderText('请输入');field.textChanged.connect(lambda *_:self.changed.emit());controls[key]=field;bf.addRow(label,field)
@@ -304,68 +304,99 @@ class SupportEditor(QWidget):
    value=record.get(key,'')
    if key=='section':self.brackets.setCellWidget(row,col,self.section_combo(value))
    elif key=='waler_id':
-    combo=QComboBox();combo.addItems(['选择已定义围檩']+[self.text(self.walers,r,0)+' / '+self.text(self.walers,r,1) for r in range(self.walers.rowCount())]);chosen=str(value)+' / '+str(record.get('waler_case','')) if value else ''
-    if chosen and combo.findText(chosen)<0:combo.addItem(chosen)
-    combo.setCurrentText(chosen or '选择已定义围檩');combo.currentTextChanged.connect(self.emit_changed);self.brackets.setCellWidget(row,col,combo)
-   elif key in ('grade','load_model'):
-    combo=QComboBox();combo.addItems(['请选择','S235','S275','S355','S460'] if key=='grade' else ['选择受力模型','point']);combo.setCurrentText(str(value));combo.currentTextChanged.connect(self.emit_changed);self.brackets.setCellWidget(row,col,combo)
-   else:self.brackets.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
-  self.busy=False;self.changed.emit()
- def collect(self,length,width):
-  self.apply_case()
-  if not self.case_name.text().strip() and not self._multi_case:raise ValueError('请在页面顶部填写统一工况')
-  self.refresh();members=[]
-  for row,m in enumerate(self.read_rows(self.struts,STRUT_FIELDS)):
-   m['kind']='Strut';m['lx_is_default']=bool(self.struts.item(row,STRUT_FIELDS.index('lx_m')).data(Qt.ItemDataRole.UserRole));members.append(m)
-  for row,m in enumerate(self.read_rows(self.walers,WALER_FIELDS)):
-   source=m.pop('source_strut');parts=source.split(' / ');m.update(kind='Waler',angle_deg=0.0,source_strut_id=parts[0] if len(parts)==2 else '',source_strut_case=parts[1] if len(parts)==2 else '');members.append(m)
-   m['lx_is_default']=bool(self.walers.item(row,WALER_FIELDS.index('lx_m')).data(Qt.ItemDataRole.UserRole))
-  try:thickness=float(self.thickness.text()) if self.thickness.text().strip() else None
-  except ValueError:raise ValueError('Blinding厚度须为数字')
-  brackets=self.read_rows(self.brackets,BRACKET_FIELDS)
-  for b in brackets:
-   parts=b['waler_id'].split(' / ');b['waler_id']=parts[0] if len(parts)==2 else '';b['waler_case']=parts[1] if len(parts)==2 else ''
-   b['eccentricity_m']=b['length_m']/2 if isinstance(b.get('length_m'),(float,int)) else None
-   for key,field in self.bracket_weld_controls.items():
-    try:b[key]=float(field.text()) if field.text().strip() else None
-    except ValueError:raise ValueError(f'托架焊缝 {key}须为数字')
-  return dict(schema_version=2,case_name=self.case_name.text().strip(),connection_groups=self.collect_groups(),connection_template=AA_CONNECTIONS,brackets=brackets,enabled=True,include_sheetpile=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
- def load(self,record):
-  self.struts.setRowCount(0);self.walers.setRowCount(0);self.welds.setRowCount(0);self.brackets.setRowCount(0)
-  cases=list(dict.fromkeys(m.get('case','LC1') for m in record.get('members',[])))
-  self._multi_case=len(cases)>1;case=record.get('case_name') or (cases[0] if len(cases)==1 else '' if cases else 'LC1');self._case_synced=case;self.case_name.setText(case)
-  self.case_notice.setText('已保留历史多个工况。顶部输入统一工况后，才会统一替换；构件内力保留。' if self._multi_case else '');self.case_notice.setVisible(self._multi_case)
-  for table,fields in [(self.struts,STRUT_FIELDS),(self.walers,WALER_FIELDS),(self.brackets,BRACKET_FIELDS)]:table.setColumnHidden(fields.index('case'),not self._multi_case)
-  for controls in self.connection_controls.values():
-   controls['enabled'].setChecked(False)
-   for key,field in controls.items():
-    if isinstance(field,QLineEdit):field.clear()
-  self.combined.setChecked(record.get('include_sheetpile',True));self.source.setText(record.get('source',''));self.include_blinding.setChecked(record.get('include_blinding',record.get('blinding_thickness_mm') is not None));self.thickness.setText('' if record.get('blinding_thickness_mm') is None else str(record['blinding_thickness_mm']))
-  for m in record.get('members',[]):
-   if m['kind']=='Strut':self.add_member('Strut',m)
-  for m in record.get('members',[]):
-   if m['kind']=='Waler':
-    row=dict(m);row['source_strut']=row.get('source_strut_id','')+' / '+row.get('source_strut_case','');self.add_member('Waler',row)
-  for w in record.get('welds',[]):self.add_weld(w)
-  for b in record.get('brackets',[]):self.add_bracket(b)
-  for key,field in self.bracket_weld_controls.items():
-   values={b.get(key) for b in record.get('brackets',[])};value=values.pop() if len(values)==1 else None
-   field.setText('' if value is None else str(value))
-  if any(len({b.get(key) for b in record.get('brackets',[])})>1 for key in self.bracket_weld_controls):
-   self.legacy_notice.setText('历史托架的焊缝参数不一致，请在本页填写统一参数后生成。')
-  groups=record.get('connection_groups')
-  if groups is None:
-   groups=[]
-   for kind in self.connection_controls:
-    rows=[w for w in record.get('welds',[]) if w.get('kind')==kind]
-    if not rows:continue
-    group=dict(kind=kind,enabled=True,distribution_mode='manual')
-    for key in ('leg_mm','strength_mpa','effective_length_mm','distribution_length_m'):
-     values={w.get(key) for w in rows};group[key]=values.pop() if len(values)==1 else None
-    groups.append(group)
-  for group in groups:
-   controls=self.connection_controls[group['kind']];controls['enabled'].setChecked(group.get('enabled',False))
-   for key,field in controls.items():
-    if isinstance(field,QLineEdit):field.setText('' if group.get(key) is None else str(group[key]))
-   if 'distribution_mode' in controls:controls['distribution_mode'].setCurrentIndex(0 if group.get('distribution_mode')=='span' else 1)
-  self.update_connection_controls()
+    combo=QComboBox();combo.addItems(['选择已定义围檩']+[self.text(self.walers,r,0)+' /…2413 tokens truncated…:f'=1.4*ABS(H{row})*M{row}^2/8' if editable else f"='{member.Name}'!J13",
+                  'AD':f"='{member.Name}'!D36",'Q':f'=IF(O{row}<=R{row},"<=",">")','W':f'=IF(U{row}<=X{row},"<=",">")','AC':f'=IF(AA{row}<=AD{row},"<=",">")', 'AG':combined_status(member,row)}
+        for col,formula in formulas.items():set_formula(summary,f'{col}{row}',formula)
+        if editable:
+            if force_kn:
+                linked,_=member_sheets[(m['source_strut_id'],m['source_strut_case'])]
+                linked_row=member_sheets[(m['source_strut_id'],m['source_strut_case'])][1]['axial_summary_row']
+                summary.Range(f'H{row}').Formula=f"=ABS('{summary.Name}'!R{linked_row})/'{summary.Name}'!I{linked_row}"
+                summary.Range(f'K{row}').Formula=f"='{summary.Name}'!I{linked_row}"
+            for cell,col in [('J11','O'),('J12','U'),('J13','AA')]:member.Range(cell).Formula=f"='{summary.Name}'!{col}{row}"
+        else:
+            if force_kn:
+                axial_row=design['axial_summary_row']
+                summary.Range(f'H{row}').Formula=f"='{summary.Name}'!R{axial_row}"
+                summary.Range(f'K{row}').Formula=f"='{summary.Name}'!I{axial_row}"
+                if m.get('lx_is_default'):member.Range('J16').Formula=f"='{summary.Name}'!M{row}"
+                if m.get('lx_equals_ly'):member.Range('J18').Formula='=J16'
+            member.Range('J12').Formula=f"=1.4*77*R15/10000*'{summary.Name}'!M{row}/2"
+            member.Range('J13').Formula=f"=J12*'{summary.Name}'!M{row}/4"
+    for row,m in enumerate(walers,start):action_row(m,row,True)
+    last=start+max(len(walers),1)-1
+    if struts:
+        heading=last+3;copy_rows(source,summary,16,18,heading)
+        summary.Range(f'B{heading}').Value2='III. Strut Shear and Moment Checks'
+        summary.Range(f'AD{heading+1}').Value2='Capacity Mc (kNm)'
+        if force_kn:
+            summary.Range(f'H{heading+1}').Value2='Normal F (kN)'
+            summary.Range(f'K{heading+1}').Value2='Spacing (m)'
+            summary.Range(f'M{heading+1}').Value2='Strut length (m)'
+        for row,m in enumerate(struts,heading+3):action_row(m,row,False)
+        last=heading+2+len(struts)
+    for row in range(12,last+1):
+        for col in ('H','I','L','K','M','O','R','U','X','AA','AC','AD'):
+            summary.Range(f'{col}{row}').NumberFormat='0.00'
+            summary.Range(f'{col}{row}').ShrinkToFit=True
+    wb.Application.CalculateFullRebuild()
+    for member,design in member_sheets.values():
+        row=design['summary_row']
+        design['summary_status']=summary.Range(f'AG{row}').Value2
+        if design['summary_status']!='OK':
+            design['status']='FAIL'
+    return last
+
+
+def build_welds(wb,sheet,package,member_sheets,numeric):
+    source=wb.Worksheets('Connection check')
+    sheet.Range('A7:AH200').UnMerge();sheet.Range('A7:AH200').Clear()
+    row=7;results=[]
+    from .critical_connections import governing_welds,force_key,attach_live_selector
+    for w in governing_welds(package,member_sheets):
+        member,design=member_sheets[(w['member_id'],w['case'])]
+        at=lambda col,offset:f'{col}{row+offset}'
+        ref=lambda cell:f"'{member.Name}'!{cell}"
+        label=w['member_id']+' / '+w['case']
+        if w['kind']=='Strut-Waler':
+            copy_rows(source,sheet,7,16,row)
+            corner=design['member']['angle_deg']>0
+            sheet.Range(at('B',0)).Value2=f'Connection Check: {label} ({"Corner Strut" if corner else "Strut"} - Waler)'
+            force_member,force_design=member_sheets[force_key(w)]
+            sheet.Range(at('B',1)).Value2='Waling design shear'
+            sheet.Range(at('B',2)).Value2='Design Shear From Waling'
+            sheet.Range(at('Q',2)).ClearContents()
+            for col,offset in [('M',1),('M',2),('O',9)]:
+                sheet.Range(at(col,offset)).NumberFormat='0.00'
+            vref=f"'{force_member.Name}'!J12"
+            formulas={at('M',1):f'=IF(COUNT({vref})=1,ABS({vref}),"INPUTS REQUIRED")',at('M',2):f'={at("M",1)}',at('W',2):f'={at("M",2)}',
+                      at('J',4):'='+ref('R17'),at('J',5):f'={ref("R17")}-{ref("R18")}',at('J',6):'='+ref('R20')}
+            sheet.Range(at('D',3)).Value2=w['leg_mm'];sheet.Range(at('U',8)).Value2=w['strength_mpa']
+            formulas[at('O',9)]=f'={at("W",2)}'
+            cap_cell=at('J',9);force_cell=at('O',9);status_cell=at('AE',9)
+            formulas[at('N',9)]=f'=IF({cap_cell}>={force_cell},">=","<")'
+            length=2*(numeric(member,'R17')+(numeric(member,'R17')-numeric(member,'R18'))+numeric(member,'R20'))
+            demand=abs(force_design['design_actions']['v']);units='kN';count=10
+        else:
+            copy_rows(source,sheet,18,23,row)
+            sheet.Range(at('B',0)).Value2=f'Connection Check: {label} (Waler - Sheet Piles)'
+            sheet.Range(at('H',1)).Value2='kN from waler'
+            sheet.Range(at('Q',1)).Value2=w['distribution_length_m']
+            sheet.Range(f'{at("Q",1)}:{at("R",1)}').Merge()
+            sheet.Range(at('S',1)).Value2='m long'
+            sheet.Range(at('Q',1)).NumberFormat='0.00'
+            sheet.Range(at('B',3)).Value2=w['leg_mm'];sheet.Range(at('O',4)).Value2=w['strength_mpa']
+            sheet.Range(at('U',4)).Value2=w['effective_length_mm']/2
+            formulas={at('F',1):'='+ref('J12'),at('F',2):f'={at("F",1)}/{at("Q",1)}',at('K',5):f'={at("F",2)}'}
+            cap_cell=at('G',5);force_cell=at('K',5);status_cell=at('AE',5)
+            formulas[at('J',5)]=f'=IF({cap_cell}>={force_cell},">=","<")'
+            length=w['effective_length_mm'];demand=design['design_actions']['v']/w['distribution_length_m'];units='kN/m';count=6
+        formulas[status_cell]=f'=IF(COUNT({cap_cell},{force_cell})<2,"CHECK INPUTS",IF(AND({cap_cell}>0,{cap_cell}>={force_cell}),"OK","NOT OK"))'
+        for cell,formula in formulas.items():set_formula(sheet,cell,formula)
+        sheet.Calculate();cap=numeric(sheet,cap_cell)
+        expected=.7*w['leg_mm']*w['strength_mpa']*length/1000
+        attach_live_selector(wb,sheet,w,member_sheets,row)
+        if not math.isclose(cap,expected,rel_tol=1e-9) or not math.isclose(numeric(sheet,force_cell),demand,rel_tol=1e-9):raise ValueError('Connection check与独立算式不一致')
+        results.append({'input':w,'demand':demand,'capacity':cap,'units':units,'effective_length_mm':length,'status':'PASS' if cap>=demand else 'FAIL','capacity_cell':cap_cell,'force_cell':force_cell,'status_cell':status_cell})
+        row+=count+1
+    return results,row-2

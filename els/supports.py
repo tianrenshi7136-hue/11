@@ -141,6 +141,9 @@ def validate_package(package, library=None):
         key = (w.get('member_id'), w.get('case'))
         m = linked.get(key)
         kind = w.get('kind')
+        if kind=='Strut-Waler' and not w.get('group_id'):
+            from .critical_connections import associated_walers
+            if not associated_walers(package,w):errors.append(f'焊缝{i}缺少对应围檩，需关联围檩以读取设计剪力')
         if not m or kind not in ('Strut-Waler', 'Waler-Sheetpile') or m.get('kind') != ('Strut' if kind == 'Strut-Waler' else 'Waler'):
             errors.append(f'焊缝{i}构件关联或连接类型错误')
         if key + (kind,) in weld_seen:
@@ -457,7 +460,8 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
             detach_external_links(wb,names)
             from .printing import format_check_results
             for name in names:format_check_results(wb.Worksheets(name))
-            wb.Save();wb.ExportAsFixedFormat(0,str(pdf.resolve()))
+            from .sheetpile import save_and_export
+            save_and_export(wb,pdf.resolve())
         result={'module':'support_structure','request':package,'project_name':project_name,'subject_name':subject_name,
                 'steel_request':steel_request if package.get('include_blinding',True) else None,
                 'template_sha256':before,'output_sheets':names,'support_package_results':checks,

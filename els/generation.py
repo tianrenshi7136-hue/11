@@ -27,7 +27,8 @@ def generation_plan(steel,package):
         if not group.get('enabled'):continue
         kind='Strut' if group['kind']=='Strut-Waler' else 'Waler'
         required=('leg_mm','strength_mpa')+(('effective_length_mm',) if kind=='Waler' else ())+(('distribution_length_m',) if kind=='Waler' and group.get('distribution_mode')=='manual' else ())
-        if any(m['kind']==kind for m in members) and all(positive(group.get(k)) for k in required):groups.append(group)
+        has_force_source=kind!='Strut' or any(m['kind']=='Waler' for m in members)
+        if has_force_source and any(m['kind']==kind for m in members) and all(positive(group.get(k)) for k in required):groups.append(group)
     if not groups:missing.append('Weld 连接')
     elif len(groups)<sum(bool(g.get('enabled')) for g in p.get('connection_groups',[])):missing.append('部分 Weld 连接')
     p['connection_groups']=groups;p['welds']=[]

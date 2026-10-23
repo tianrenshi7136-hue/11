@@ -142,7 +142,7 @@ class Workbench(QMainWindow):
         super().__init__()
         from .theme import workbench_style
         QApplication.instance().setStyleSheet(workbench_style())
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.7")
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.7.1")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()

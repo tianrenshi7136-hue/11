@@ -134,7 +134,7 @@ def build_aa_connections(wb, sheet, package, member_sheets, numeric):
     with aa_source(wb.Application) as (source_book, fingerprint):
         source = source_book.Worksheets('Connection check')
         # Match the supplied page: waling / sheet pile, brackets, strut / waling.
-        from .critical_connections import governing_welds,attach_live_selector
+        from .critical_connections import governing_welds,attach_live_selector,force_key
         ordered = sorted(governing_welds(package,member_sheets), key=lambda w: w['kind'] != 'Waler-Sheetpile')
         def emit_weld(w):
             nonlocal row
@@ -157,13 +157,16 @@ def build_aa_connections(wb, sheet, package, member_sheets, numeric):
             else:
                 copy_rows(source, sheet, 7, 16, row)
                 sheet.Range(at('B',0)).Value2=f'Connection: {"Corner Strut" if design["member"]["angle_deg"]>0 else "Strut"} - Waling ({label})'
-                sheet.Range(at('B',1)).Value2='Design axial force';sheet.Range(at('P',1)).Value2='kN'
+                force_member,force_design=member_sheets[force_key(w)]
+                sheet.Range(at('B',0)).Value2+=f'; Waling {force_key(w)[0]}'
+                sheet.Range(at('B',1)).Value2='Waling design shear';sheet.Range(at('P',1)).Value2='kN'
                 sheet.Range(at('B',2)).Value2='Connection design force'
                 sheet.Rows(row+1).Hidden=True
-                sheet.Range(at('B',2)).Value2='Shear Load From Corner Strut' if design['member']['angle_deg']>0 else 'Load From Strut'
+                sheet.Range(at('B',2)).Value2='Design Shear From Waling'
                 sheet.Range(f'{at("P",2)}:{at("Y",2)}').UnMerge();sheet.Range(f'{at("P",2)}:{at("Y",2)}').Clear();sheet.Range(at('P',2)).Value2='kN'
                 sheet.Range(at('D',3)).Value2=w['leg_mm'];sheet.Range(at('U',8)).Value2=w['strength_mpa']
-                formulas={at('M',1):'='+ref('J11'),at('M',2):'='+at('M',1),at('J',4):'='+ref('R17'),at('J',5):'='+ref('R17')+'-'+ref('R18'),at('J',6):'='+ref('R20'),at('J',7):'='+at('D',3),at('V',7):f'={at("J",7)}*0.7'}
+                vref=f"'{force_member.Name}'!J12"
+                formulas={at('M',1):f'=IF(COUNT({vref})=1,ABS({vref}),"INPUTS REQUIRED")',at('M',2):'='+at('M',1),at('J',4):'='+ref('R17'),at('J',5):'='+ref('R17')+'-'+ref('R18'),at('J',6):'='+ref('R20'),at('J',7):'='+at('D',3),at('V',7):f'={at("J",7)}*0.7'}
                 for offset in (4,5,6):
                     sheet.Range(at('O',offset)).Value2=2;formulas[at('V',offset)]=f'={at("J",offset)}*{at("O",offset)}'
                 for c,offset in [('K',4),('N',5),('Q',6)]:formulas[at(c,8)]='='+at('V',offset)
@@ -172,7 +175,7 @@ def build_aa_connections(wb, sheet, package, member_sheets, numeric):
                 formulas[at('O',9)]='='+at('M',2)
                 cap,force,status,count=at('J',9),at('O',9),at('AE',9),10
                 length=2*(numeric(member,'R17')+numeric(member,'R17')-numeric(member,'R18')+numeric(member,'R20'))
-                demand=design['design_actions']['n'];units='kN'
+                demand=abs(force_design['design_actions']['v']);units='kN'
             formulas[status]=guarded_status(cap,force)
             comparison=at('J',5) if w['kind']=='Waler-Sheetpile' else at('N',9)
             formulas[comparison]=f'=IF(COUNT({cap},{force})<2,"?",IF({cap}>={force},">=","<"))'

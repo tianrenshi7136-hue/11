@@ -71,9 +71,10 @@ class WorkflowTests(unittest.TestCase):
   self.assertEqual(sum(w['kind']=='Strut-Waler' for w in p['welds']),3)
  def test_governing_is_maximum_force_not_utilization(self):
   p=resolve_package(self.editor().collect(10,5));w=copy.deepcopy(p['welds'][0]);w['member_id']='S2';p['welds'].append(w)
-  fake={('S1','LC1'):(None,{'design_actions':{'n':500,'v':0}}),('S2','LC1'):(None,{'design_actions':{'n':800,'v':0}}),('W1','LC1'):(None,{'design_actions':{'n':0,'v':252}})}
+  w2=copy.deepcopy(p['members'][1]);w2.update(member_id='W2',source_strut_id='S2');p['members'].append(w2)
+  fake={('S1','LC1'):(None,{'design_actions':{'n':500,'v':0}}),('S2','LC1'):(None,{'design_actions':{'n':800,'v':0}}),('W1','LC1'):(None,{'design_actions':{'n':0,'v':400}}),('W2','LC1'):(None,{'design_actions':{'n':0,'v':252}})}
   selected=governing_welds(p,fake)
-  self.assertEqual(next(w for w in selected if w['kind']=='Strut-Waler')['member_id'],'S2')
+  chosen=next(w for w in selected if w['kind']=='Strut-Waler');self.assertEqual(chosen['member_id'],'S1');self.assertEqual(chosen['force_member_id'],'W1')
  def test_imported_reference_survives_changes_or_removal_of_original(self):
   with tempfile.TemporaryDirectory() as folder:
    root=Path(folder);source=root/'original.xls';source.write_bytes(b'original reference')

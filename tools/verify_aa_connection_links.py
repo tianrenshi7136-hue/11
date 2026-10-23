@@ -32,7 +32,7 @@ def main():
         assert c.Range(b['weld_status_cell']).Value2=='NOT OK'
         summary=wb.Worksheets('Strut & Wailing Summary');summary.Range('R12').Value2=350;app.CalculateFullRebuild()
         sw=next(w for w in result['support_package_results']['welds'] if w['input']['kind']=='Strut-Waler')
-        assert math.isclose(numeric(c,sw['force_cell']),1.4*350/math.cos(math.radians(45)),rel_tol=1e-9)
+        assert math.isclose(numeric(c,sw['force_cell']),1.4*350/3.5*4/2,rel_tol=1e-9)
         for name in result['output_sheets']:
             s=wb.Worksheets(name)
             assert s.PageSetup.CenterHorizontally and s.PageSetup.CenterVertically

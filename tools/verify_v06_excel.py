@@ -42,7 +42,7 @@ def main():
         assert math.isclose(calc.Range('J13').Value2,p*.4+q*.8**2/2,rel_tol=1e-9)
         summary=wb.Worksheets('Strut & Wailing Summary');summary.Range('R12').Value2=600;app.CalculateFullRebuild()
         c=wb.Worksheets('Connection Checks');force=c.Range(sw['force_cell']).Value2
-        assert math.isclose(force,1.4*600/math.cos(math.radians(45)),rel_tol=1e-9)
+        assert math.isclose(force,1.4*600/3.5*4/2,rel_tol=1e-9)
         row=int(''.join(ch for ch in sw['force_cell'] if ch.isdigit()))-9
         assert 'S1 / LC1' in c.Range(f'B{row}').Value2
         summary.Range('R12').MergeArea.ClearContents();app.CalculateFullRebuild()

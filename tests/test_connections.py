@@ -18,7 +18,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertAlmostEqual(result['shear_kn'],force+weight*.5)
         self.assertAlmostEqual(result['moment_knm'],force*.25+weight*.5**2/2)
         b['eccentricity_m']=.5
-        self.assertAlmostEqual(bracket_actions(b,107.8,29.3)['moment_knm'],force*.5+weight*.5**2/2)
+        self.assertAlmostEqual(bracket_actions(b,107.8,29.3)['moment_knm'],force*.25+weight*.5**2/2)
 
     def test_distributed_waler_weight_preserves_total_force(self):
         p=sample_package();b=p['brackets'][0]
@@ -37,7 +37,7 @@ class ConnectionTests(unittest.TestCase):
         p=sample_package();library=['152x152x37','203x203x86','102x102x23']
         self.assertEqual(validate_package(p,library),[])
         for field,value in [('length_m',0),('tributary_length_m',None),('effective_length_mm',math.nan),
-                            ('waler_id','S1'),('load_model',''),('eccentricity_m',.6),('grade','S999')]:
+                            ('waler_id','S1'),('load_model',''),('grade','S999')]:
             bad=copy.deepcopy(p);bad['brackets'][0][field]=value
             self.assertTrue(validate_package(bad,library),(field,value))
         bad=copy.deepcopy(p);bad['brackets'].append(copy.deepcopy(bad['brackets'][0]))
@@ -53,7 +53,8 @@ class ConnectionTests(unittest.TestCase):
         editor=SupportEditor(['152x152x37','203x203x86','102x102x23'])
         editor.load(sample_package());package=editor.collect(10,5)
         self.assertEqual(package['connection_template'],AA_CONNECTIONS)
-        self.assertEqual(package['brackets'],sample_package()['brackets'])
+        expected=sample_package()['brackets'];expected[0]['eccentricity_m']=expected[0]['length_m']/2
+        self.assertEqual(package['brackets'],expected)
         editor.add_bracket();self.assertEqual(editor.text(editor.brackets,1,0),'B2')
         self.assertIsNone(editor.collect(10,5)['brackets'][1]['length_m'])
         editor.close();editor.deleteLater();QCoreApplication.sendPostedEvents(None,QEvent.Type.DeferredDelete);app.processEvents()

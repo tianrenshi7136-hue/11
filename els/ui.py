@@ -140,7 +140,9 @@ class Workbench(QMainWindow):
     def __init__(self, database=None):
         configure_fonts()
         super().__init__()
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.5")
+        from .theme import workbench_style
+        QApplication.instance().setStyleSheet(workbench_style())
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.6")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()
@@ -234,7 +236,7 @@ class Workbench(QMainWindow):
             sf.addRow(label, edit)
             if key in ('yield_strength_mpa', 'analysis_ei_knm2_per_m', 'parameter_reference'):
                 edit.setReadOnly(True)
-                edit.setStyleSheet('background:#eef3f8;')
+                edit.setProperty('derived',True)
         self.steel_fields['bending_reduction'] = self.steel_fields['shear_reduction']
         self.steel_properties = QTableWidget(3, 8)
         self.steel_properties.setHorizontalHeaderLabels(['范围', 'w (mm)', 'h (mm)', 't (mm)', 'A', 'I', 'Z', 'm'])
@@ -325,6 +327,7 @@ class Workbench(QMainWindow):
         self.support_generate=self.support_editor.generate
         self.support_editor.changed.connect(self.steel_changed)
         self.support_editor.generate_requested.connect(self.generate_support_book)
+        self.support_editor.reference_requested.connect(self.refresh_support_reference)
         tabs.addTab(self.support_editor,'围檩／支撑计算书')
         self.support_worker=None
         self.initial_worker = None
@@ -437,6 +440,22 @@ class Workbench(QMainWindow):
 
     def collect_support(self):
         return self.support_editor.collect(self.geometry['length_m'].value(),self.geometry['width_m'].value())
+
+    def refresh_support_reference(self):
+        path,_=QFileDialog.getOpenFileName(self,'导入参考计算书',str(ROOT/'新计算书'),'Excel workbook (*.xlsx)')
+        if not path:return
+        def action():
+            from .reference_store import reference_file
+            reference_file(ROOT/'templates/supports-structure.local.json',source=path)
+            sections=section_library(aa=True);self.support_editor.sections=sections
+            from .support_editor import STRUT_FIELDS,WALER_FIELDS,BRACKET_FIELDS
+            for table,fields in [(self.support_editor.struts,STRUT_FIELDS),(self.support_editor.walers,WALER_FIELDS),(self.support_editor.brackets,BRACKET_FIELDS)]:
+                for row in range(table.rowCount()):
+                    col=fields.index('section');value=self.support_editor.text(table,row,col)
+                    table.setCellWidget(row,col,self.support_editor.section_combo(value))
+            self.support_editor.result.setPlainText('参考版式已导入。后续生成使用独立副本，开关或修改原文件不会影响生成。')
+            self.steel_changed()
+        self.guarded(action)
 
     def load_support(self,record):
         self.support_editor.load(migrate_package(record))
@@ -782,7 +801,8 @@ class Workbench(QMainWindow):
 def main():
     app = QApplication.instance() or QApplication([])
     app.setStyle("Fusion")
-    app.setStyleSheet("QPushButton { padding:7px; } QLineEdit,QDoubleSpinBox { padding:5px; } QTabWidget::pane { border:1px solid #cbd5e1; }")
+    from .theme import workbench_style
+    app.setStyleSheet(workbench_style())
     window = Workbench()
     dialog = ProjectDetailsDialog()
     if dialog.exec() != QDialog.DialogCode.Accepted:

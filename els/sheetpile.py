@@ -190,10 +190,9 @@ def preselect(request, mapping_path, output_root):
     if request.get('purpose') != 'preselection' or request.get('selection_mode') != 'lightest':
         raise ValueError('截面初选须使用独立初选输入')
     actions = envelope(request)
-    mapping = json.loads(Path(mapping_path).read_text(encoding='utf-8'))
-    template = Path(mapping['file'])
-    if sha256(template) != mapping['sha256']:
-        raise ValueError('模板指纹变化，请重新登记')
+    from .reference_store import reference_file
+    template=reference_file(mapping_path,role='wall')
+    revision=sha256(template)
     with tempfile.TemporaryDirectory() as folder:
         copy = Path(folder) / 'preselection.xls'
         shutil.copy2(template, copy)
@@ -205,9 +204,7 @@ def preselect(request, mapping_path, output_root):
     passed = [c for c in candidates if c['status'] == 'OK']
     result = {'purpose': 'preselection', 'request': request, 'envelope': actions, 'candidates': candidates,
               'selected': min(passed, key=lambda c: c['weight_kg_per_m2']) if passed else None,
-              'status': 'PRELIMINARY_SELECTION_ONLY', 'template_sha256': mapping['sha256']}
-    if sha256(template) != mapping['sha256']:
-        raise ValueError('模板在初选期间发生变化')
+              'status': 'PRELIMINARY_SELECTION_ONLY', 'template_sha256': revision}
     output = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     output.mkdir(parents=True)
     (output / 'preselection.json').write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding='utf-8')
@@ -230,11 +227,9 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
         raise ValueError('Subject Name不能为空')
     if re.search(r'[\u3400-\u9fff]', project_name + subject_name):
         raise ValueError('Project Name和Subject Name请使用英文，不得含中文字符')
-    mapping = json.loads(Path(mapping_path).read_text(encoding='utf-8'))
-    template = Path(mapping['file'])
+    from .reference_store import reference_file,detach_external_links
+    template=reference_file(mapping_path,role='wall')
     before = sha256(template)
-    if before != mapping['sha256']:
-        raise ValueError('模板指纹变化，请重新检查及登记模板')
     folder = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     folder.mkdir(parents=True, exist_ok=False)
     output_name='ELS_Structural_Check_Review' if support_package else 'Sheetpile_Structural_Check_Review'
@@ -346,10 +341,9 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                         cell = sheet.Cells(row, col)
                         if str(cell.Text) in EXCEL_ERRORS:
                             raise ValueError(f'输出公式错误：{cell.Address} {cell.Text}')
+            detach_external_links(wb,output_sheets)
             wb.Save()
             wb.ExportAsFixedFormat(0, str(pdf.resolve()))
-        if sha256(template) != before:
-            raise ValueError('原模板在生成期间变化，结果不能登记为有效')
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
                   'section_table_version': TABLE_VERSION,
                   'project_name': project_name, 'subject_name': subject_name, 'request': request, 'envelope': actions,

@@ -45,10 +45,6 @@ def validate_brackets(package, library=None):
                 errors.append(f'托架{i} {field}须填写正数')
         if b.get('load_model') != 'point':
             errors.append(f'托架{i}须采用已确认的围檩重心集中力模型')
-        if b.get('load_model') == 'point':
-            e = b.get('eccentricity_m')
-            if not finite(e) or e < 0 or (finite(b.get('length_m')) and e > b['length_m']):
-                errors.append(f'托架{i}受力点距离须在0与托架长度之间')
     return errors
 
 
@@ -57,7 +53,7 @@ def bracket_actions(bracket, waler_area_cm2, bracket_area_cm2):
     length = bracket['length_m']
     waler_force = 1.4 * 77 * waler_area_cm2 / 10000 * bracket['tributary_length_m']
     selfweight = 1.4 * 77 * bracket_area_cm2 / 10000
-    eccentricity = bracket['eccentricity_m'] if bracket['load_model'] == 'point' else length / 2
+    eccentricity = length / 2
     return dict(waler_force_kn=waler_force, selfweight_kn_per_m=selfweight,
                 shear_kn=waler_force+selfweight*length,
                 moment_knm=waler_force*eccentricity+selfweight*length**2/2)
@@ -67,9 +63,9 @@ def bracket_actions(bracket, waler_area_cm2, bracket_area_cm2):
 def aa_source(app):
     """Inspect a source snapshot; the approved engineer file is never opened writable."""
     from .supports import ROOT
-    registry = json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf8'))
-    source = Path(registry.get('connection_file', registry['blinding_file']))
-    expected = registry.get('connection_sha256', registry['blinding_sha256'])
+    from .reference_store import reference_file
+    source=reference_file(ROOT/'templates/supports-structure.local.json')
+    expected=sha256(source)
     with controlled_source(app, source, expected) as opened:
         yield opened
 
@@ -81,16 +77,11 @@ def controlled_source(app, source, expected):
     with tempfile.TemporaryDirectory(prefix='els-aa-') as folder:
         snapshot = Path(folder)/'aa-source.xlsx'
         copy_source(source, snapshot)
-        if sha256(snapshot) != expected:
-            raise ValueError('AA模板指纹变化，请重新审查及登记')
         book = app.Workbooks.Open(str(snapshot), UpdateLinks=0, ReadOnly=True, AddToMru=False)
         try:
             yield book, expected
         finally:
             book.Close(SaveChanges=False)
-        copy_source(source, snapshot)
-        if sha256(snapshot) != expected:
-            raise ValueError('AA模板在生成期间变化')
 
 
 def copy_source(source, destination):
@@ -143,7 +134,8 @@ def build_aa_connections(wb, sheet, package, member_sheets, numeric):
     with aa_source(wb.Application) as (source_book, fingerprint):
         source = source_book.Worksheets('Connection check')
         # Match the supplied page: waling / sheet pile, brackets, strut / waling.
-        ordered = sorted(package.get('welds', []), key=lambda w: w['kind'] != 'Waler-Sheetpile')
+        from .critical_connections import governing_welds,attach_live_selector
+        ordered = sorted(governing_welds(package,member_sheets), key=lambda w: w['kind'] != 'Waler-Sheetpile')
         def emit_weld(w):
             nonlocal row
             member, design = member_sheets[(w['member_id'], w['case'])]
@@ -191,6 +183,7 @@ def build_aa_connections(wb, sheet, package, member_sheets, numeric):
             sheet.Calculate();capacity=numeric(sheet,cap)
             if not math.isclose(capacity,.7*w['leg_mm']*w['strength_mpa']*length/1000,rel_tol=1e-9) or not math.isclose(numeric(sheet,force),demand,rel_tol=1e-9):
                 raise ValueError('AA连接模板与独立焊缝算式不一致')
+            attach_live_selector(wb,sheet,w,member_sheets,row)
             results.append(dict(input=w,demand=demand,capacity=capacity,units=units,effective_length_mm=length,status='PASS' if capacity>=demand else 'FAIL',capacity_cell=cap,force_cell=force,status_cell=status))
             row+=count+1
         for w in ordered:
@@ -249,11 +242,11 @@ def build_brackets(wb, sheet, source_book, package, member_sheets, row, numeric)
             sheet.Range(f'{at("AB",offset)}:{at("AH",offset)}').UnMerge()
             sheet.Range(f'{at("AB",offset)}:{at("AH",offset)}').Merge()
             sheet.Range(at('AB',offset)).NumberFormat='0.000'
-            if offset in (1,2,4):sheet.Range(at('AB',offset)).Interior.Color=65535
+            if offset in (1,2):sheet.Range(at('AB',offset)).Interior.Color=65535
         sheet.Range(at('U',1)).Value2='Bracket spacing (m)';sheet.Range(at('AB',1)).Value2=b['tributary_length_m']
         sheet.Range(at('U',2)).Value2='Bracket m';sheet.Range(at('AB',2)).Value2=b['length_m']
         sheet.Range(at('U',3)).Value2='Load model';sheet.Range(at('AB',3)).Value2=b['load_model']
-        sheet.Range(at('U',4)).Value2='Load e (m)';sheet.Range(at('AB',4)).Value2=b.get('eccentricity_m') if b['load_model']=='point' else None
+        sheet.Range(at('U',4)).Value2='Load e = L/2 (m)';sheet.Range(at('AB',4)).Formula='='+at('AB',2)+'/2'
         # Reuse row 30 for the selfweight and actual actions. No next-page reference.
         sheet.Range(f'{at("B",5)}:{at("AH",5)}').UnMerge();sheet.Range(f'{at("B",5)}:{at("AH",5)}').Clear()
         sheet.Range(f'{at("B",5)}:{at("I",5)}').Merge();sheet.Range(at('B',5)).Value2='Bracket selfweight q (kN/m)'

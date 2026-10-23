@@ -59,6 +59,12 @@ def resolve_package(package):
             m['load_width_m']=spacing;m['angle_deg']=0.0
             m['anchor_kn_per_m']=abs(force)/spacing if finite(force) and finite(spacing) and spacing>0 else None
         if m.get('lx_equals_ly'):m['ly_m']=m.get('lx_m')
+        if m.get('use_default_k'):
+            m.update(kx=1.0,ky=1.0,klt=1.0)
+    for bracket in result.get('brackets',[]):
+        bracket['eccentricity_m']=bracket['length_m']/2 if finite(bracket.get('length_m')) else None
+    from .critical_connections import expand_groups
+    expand_groups(result)
     return result
 
 
@@ -67,9 +73,10 @@ def section_library(aa=False):
         from tempfile import TemporaryDirectory
         from openpyxl import load_workbook
         from .connections import copy_source
-        registry=json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf8'))
+        from .reference_store import reference_file
+        imported=reference_file(ROOT/'templates/supports-structure.local.json')
         with TemporaryDirectory(prefix='els-aa-sections-') as folder:
-            snapshot=Path(folder)/'aa.xlsx';copy_source(registry.get('connection_file',registry['blinding_file']),snapshot)
+            snapshot=Path(folder)/'aa.xlsx';copy_source(imported,snapshot)
             book=load_workbook(snapshot,read_only=True,data_only=True,keep_links=False)
             try:
                 return [r[0] for r in book['Section Table UC'].iter_rows(min_row=5,max_row=128,max_col=1,values_only=True) if isinstance(r[0],str) and 'x' in r[0]]
@@ -87,6 +94,8 @@ def validate_package(package, library=None):
         return ['构件输入须为对象']
     package=resolve_package(package)
     errors, seen = [], set()
+    from .critical_connections import validate_groups
+    errors.extend(validate_groups(package))
     members = package.get('members', [])
     if not isinstance(members, list) or not members:
         return ['至少录入一个支撑或围檩工况']
@@ -235,7 +244,8 @@ def populate(wb, package, actions, project, subject):
     include_blinding=package.get('include_blinding',True)
     if include_blinding:
         registry = json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf-8'))
-        blinding_file=Path(registry['blinding_file'])
+        from .reference_store import reference_file
+        blinding_file=reference_file(ROOT/'templates/supports-structure.local.json')
     output, results, member_sheets = [], [], {}
     def copy_sheet(name):
         source = wb.Worksheets(name)
@@ -339,7 +349,7 @@ def populate(wb, package, actions, project, subject):
     if include_blinding:
         # Copy only the engineer-selected Blinding worksheet from the separate source.
         from .connections import controlled_source
-        with controlled_source(app,blinding_file,registry['blinding_sha256']) as (other,source_hash):
+        with controlled_source(app,blinding_file,sha256(blinding_file)) as (other,source_hash):
             # XLS has 65,536 rows: copy the controlled region of the XLSX source.
             blind=copy_sheet('Blinding')
             blind.Range('A1:AH100').UnMerge()
@@ -405,9 +415,8 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
     from .connections import AA_CONNECTIONS,copy_source,prepare_aa_workbook
     aa=package.get('connection_template')==AA_CONNECTIONS
     if aa:
-        registry=json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf8'))
-        source=Path(registry.get('connection_file',registry['blinding_file']))
-        expected_hash=registry.get('connection_sha256',registry['blinding_sha256'])
+        from .reference_store import reference_file
+        source=reference_file(ROOT/'templates/supports-structure.local.json')
     else:
         mapping=json.loads(Path(mapping_path).read_text(encoding='utf8'))
         source=Path(mapping['file']);expected_hash=mapping['sha256']
@@ -417,7 +426,6 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
         if aa:copy_source(source,target)
         else:shutil.copy2(source,target)
         before=sha256(target)
-        if before!=expected_hash:raise ValueError('模板指纹变化，请重新审查登记')
         with excel_session(target) as (app,wb):
             if aa:prepare_aa_workbook(wb)
             else:check_template(wb)
@@ -443,13 +451,9 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                 try:bad=ws.Range(ws.PageSetup.PrintArea).SpecialCells(-4123,16)
                 except Exception:bad=None
                 if bad is not None:raise ValueError(f'{name}打印区域存在公式错误：{bad.Address}')
+            from .reference_store import detach_external_links
+            detach_external_links(wb,names)
             wb.Save();wb.ExportAsFixedFormat(0,str(pdf.resolve()))
-        if aa:
-            from tempfile import TemporaryDirectory
-            with TemporaryDirectory(prefix='els-aa-hash-') as temporary:
-                snapshot=Path(temporary)/'aa.xlsx';copy_source(source,snapshot)
-                if sha256(snapshot)!=before:raise ValueError('原模板在生成期间变化')
-        elif sha256(source)!=before:raise ValueError('原模板在生成期间变化')
         result={'module':'support_structure','request':package,'project_name':project_name,'subject_name':subject_name,
                 'steel_request':steel_request if package.get('include_blinding',True) else None,
                 'template_sha256':before,'output_sheets':names,'support_package_results':checks,

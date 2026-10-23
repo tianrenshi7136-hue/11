@@ -51,6 +51,7 @@ def build_summary(wb,summary,package,member_sheets):
         copy_rows(source,summary,19,19,row)
         member,design=member_sheets[(m['member_id'],m['case'])];i=index_by_key[(m['member_id'],m['case'])]
         design['summary_row']=row
+        design['summary_sheet']=summary.Name
         data=lambda col:f"'Member Data'!{col}{i}"
         summary.Range(f'B{row}').Value2=m['member_id']+' / '+m['case']
         formulas={'D':f"='{member.Name}'!P11",'H':'='+data('M'),'K':'='+data('P'),'M':'='+data('S'),

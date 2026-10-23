@@ -4,53 +4,134 @@ import re
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QCheckBox,
  QTableWidget,QTableWidgetItem,QComboBox,QCompleter,QHeaderView,QPushButton,QTabWidget,
- QFormLayout,QTextEdit,QInputDialog,QMessageBox)
+ QFormLayout,QTextEdit,QInputDialog,QMessageBox,QGroupBox,QScrollArea,QStyledItemDelegate,QAbstractItemView,QApplication)
 from .connections import AA_CONNECTIONS, BRACKET_FIELDS
 
-STRUT_FIELDS=('member_id','case','section','grade','anchor_kn','spacing_m','angle_deg','strut_length_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt')
-WALER_FIELDS=('member_id','case','section','grade','source_strut','anchor_kn_per_m','load_width_m','load_span_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt')
+STRUT_FIELDS=('member_id','case','section','grade','anchor_kn','spacing_m','angle_deg','strut_length_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt','use_default_k')
+WALER_FIELDS=('member_id','case','section','grade','source_strut','anchor_kn_per_m','load_width_m','load_span_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt','use_default_k')
 WELD_FIELDS=('member_id','case','kind','leg_mm','strength_mpa','effective_length_mm','distribution_length_m')
 TEXT_FIELDS={'member_id','case','section','grade','source_strut','kind','bracket_id','waler_id','waler_case','load_model'}
+
+class EngineeringNumbers(QStyledItemDelegate):
+ def __init__(self,fields,parent=None):super().__init__(parent);self.fields=fields
+ def displayText(self,value,locale):
+  return str(value)
+ def initStyleOption(self,option,index):
+  super().initStyleOption(option,index)
+  key=self.fields[index.column()]
+  if key in TEXT_FIELDS or key=='lx_equals_ly':return
+  try:number=float(index.data())
+  except (ValueError,TypeError):return
+  digits=3 if key.endswith('_m') else 1 if key in ('angle_deg','leg_mm','effective_length_mm') else 0 if key=='strength_mpa' else 2
+  option.text=f'{number:.{digits}f}'
 
 class SupportEditor(QWidget):
  changed=Signal()
  generate_requested=Signal()
+ reference_requested=Signal()
  def __init__(self,sections,parent=None):
-  super().__init__(parent);self.sections=sections;self.busy=False
-  layout=QVBoxLayout(self)
-  self.combined=QCheckBox('在钢板桩计算书中同时加入围檩／支撑工作表');layout.addWidget(self.combined)
-  self.source=QLineEdit();self.source.setPlaceholderText('PLAXIS／FREW分析文件及版本（必填）');layout.addWidget(self.source)
-  self.tabs=QTabWidget();layout.addWidget(self.tabs)
-  self.struts=self.member_page('Strut',STRUT_FIELDS,['编号','工况','截面（输入搜索）','钢材','墙法线力\nkN（未分项）','支撑间距\nm','角度\ndeg','Strut length\nm','Lx\nm','Ly\nm','Lx=Ly','Kx','Ky','KLT'])
-  self.walers=self.member_page('Waler',WALER_FIELDS,['编号','工况','截面（输入搜索）','钢材','关联支撑／工况','自动分布荷载\nkN/m','自动荷载宽度\nm','Span\nm','Lx\nm','Ly\nm','Lx=Ly','Kx','Ky','KLT'])
-  extra=QWidget();el=QVBoxLayout(extra)
-  self.welds=QTableWidget(0,len(WELD_FIELDS));self.welds.setHorizontalHeaderLabels(['构件编号','工况','连接','焊脚 mm','焊缝强度 MPa','有效焊长 mm/m','分配长度 m']);self.welds.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents);el.addWidget(self.welds)
-  buttons=QHBoxLayout();el.addLayout(buttons)
-  for label,action in [('增加焊缝',lambda:self.add_weld()),('删除选中焊缝',lambda:self.delete_rows(self.welds))]:
-   b=QPushButton(label);b.clicked.connect(action);buttons.addWidget(b)
-  el.addWidget(QLabel('录入焊缝后生成时自动加入；不填写则只生成构件验算。支撑焊长自动计算，围檩焊长按每米墙宽输入。'))
-  bracket_label=QLabel('Bracket：承担托架间距范围内的围檩自重及自身自重。围檩重心距墙为力臂（原表0.5m），与托架长度分开输入；采用AA文件的Bracket工作表验算构件。');bracket_label.setWordWrap(True);el.addWidget(bracket_label)
-  self.brackets=QTableWidget(0,len(BRACKET_FIELDS));self.brackets.setHorizontalHeaderLabels(['托架编号','工况','围檩编号','围檩工况','截面（输入搜索）','钢材','托架长度\nm','托架间距\nm','受力模型','围檩重心距墙\nm','焊脚\nmm','焊缝强度\nMPa','总有效焊长\nmm'])
-  self.brackets.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents);el.addWidget(self.brackets)
-  self.brackets.setColumnHidden(BRACKET_FIELDS.index('load_model'),True)
-  bracket_buttons=QHBoxLayout();el.addLayout(bracket_buttons)
-  for label,action in [('增加托架',lambda:self.add_bracket()),('删除选中托架',lambda:self.delete_rows(self.brackets))]:
-   button=QPushButton(label);button.clicked.connect(action);bracket_buttons.addWidget(button)
-  self.brackets.itemChanged.connect(self.emit_changed)
-  self.include_blinding=QCheckBox('同时生成 Blinding（使用钢板桩页面的未分项剪力）');el.addWidget(self.include_blinding)
-  form=QFormLayout();self.thickness=QLineEdit();self.thickness.setPlaceholderText('输入厚度 mm，fcu沿用模板20 MPa');form.addRow('Blinding厚度 mm',self.thickness);el.addLayout(form)
-  self.tabs.addTab(extra,'Weld／Bracket／Blinding')
-  self.generate=QPushButton('生成围檩／支撑计算书及 PDF');self.generate.setMinimumHeight(38);self.generate.clicked.connect(lambda *_:self.generate_requested.emit());layout.addWidget(self.generate)
-  layout.removeWidget(self.generate);layout.insertWidget(2,self.generate)
-  self.result=QTextEdit();self.result.setReadOnly(True);self.result.setMaximumHeight(100);layout.addWidget(self.result)
-  for field in (self.source,self.thickness):field.textChanged.connect(lambda *_:self.changed.emit())
+  super().__init__(parent);self.sections=sections;self.busy=False;self._multi_case=False;self._case_synced='LC1'
+  self.setObjectName('SupportEditor')
+  self.setStyleSheet("QGroupBox {font-weight:600; margin-top:12px; padding:16px 12px 12px;} QGroupBox::title {subcontrol-origin:margin; left:12px;} QHeaderView::section {padding:8px 6px; font-weight:600;} QLineEdit,QComboBox {min-height:28px;} QPushButton {min-height:30px; padding:3px 12px;} QPushButton#Generate {background:#2563eb; color:white; border:0; border-radius:5px; min-height:36px;}")
+  layout=QVBoxLayout(self);layout.setContentsMargins(16,12,16,12);layout.setSpacing(12)
+  header=QGroupBox('工况与分析来源');form=QFormLayout(header);form.setSpacing(8)
+  self.case_name=QLineEdit('LC1');self.case_name.setPlaceholderText('本页统一工况，例如 ULS1')
+  self.source=QLineEdit();self.source.setPlaceholderText('填写 PLAXIS / FREW 分析文件及版本')
+  form.addRow('统一工况',self.case_name);form.addRow('内力来源',self.source);layout.addWidget(header)
+  self.case_notice=QLabel();self.case_notice.setWordWrap(True);self.case_notice.hide();layout.addWidget(self.case_notice)
+  toolbar=QHBoxLayout();self.generate=QPushButton('生成计算书及 PDF');self.generate.setObjectName('Generate');self.generate.clicked.connect(lambda *_:self.generate_requested.emit());toolbar.addWidget(self.generate,1)
+  refresh=QPushButton('更新参考模板…');refresh.clicked.connect(lambda *_:self.reference_requested.emit());toolbar.addWidget(refresh);layout.addLayout(toolbar)
+  self.combined=QCheckBox('生成钢板桩计算书时，同时加入本页构件验算');layout.addWidget(self.combined)
+  self.tabs=QTabWidget();self.tabs.setDocumentMode(True);layout.addWidget(self.tabs,1)
+  self.struts=self.member_page('Strut',STRUT_FIELDS,['编号','工况','截面（输入搜索）','钢材','墙法线力\nkN（未分项）','支撑间距\nm','角度\ndeg','Strut length\nm','Lx\nm','Ly\nm','长度联动','Kx','Ky','KLT','K 系数设置'])
+  self.walers=self.member_page('Waler',WALER_FIELDS,['编号','工况','截面（输入搜索）','钢材','关联支撑','分布荷载\nkN/m（自动）','荷载宽度\nm（自动）','Span\nm','Lx\nm','Ly\nm','长度联动','Kx','Ky','KLT','K 系数设置'])
+  # Legacy rows remain available for import/backward compatibility, not manual entry.
+  self.welds=QTableWidget(0,len(WELD_FIELDS));self.welds.hide();self.welds.itemChanged.connect(self.emit_changed)
+  page=QWidget();pl=QVBoxLayout(page);pl.setContentsMargins(12,12,12,12);pl.setSpacing(14)
+  note=QLabel('每类连接填写一组参数。自动取全部已录入构件及工况中的最大设计内力，计算书显示控制构件；无需填写连接构件编号。');note.setWordWrap(True);pl.addWidget(note)
+  cards=QHBoxLayout();cards.setSpacing(18);self.connection_controls={}
+  for kind,title in [('Strut-Waler','支撑 / 角撑 — 围檩'),('Waler-Sheetpile','围檩 — 钢板桩')]:
+   box=QGroupBox(title);bf=QFormLayout(box);bf.setSpacing(12);controls={};enabled=QCheckBox('自动检查最大设计轴力' if kind=='Strut-Waler' else '自动检查最大设计剪力');controls['enabled']=enabled;bf.addRow(enabled)
+   fields=[('leg_mm','焊脚（mm）'),('strength_mpa','焊缝强度（MPa）')]+([('effective_length_mm','每米墙宽总有效焊长（mm/m）'),('distribution_length_m','统一分配长度（m）')] if kind=='Waler-Sheetpile' else [])
+   for key,label in fields:
+    field=QLineEdit();field.setPlaceholderText('请输入');field.textChanged.connect(lambda *_:self.changed.emit());controls[key]=field;bf.addRow(label,field)
+   if kind=='Waler-Sheetpile':
+    mode=QComboBox();mode.addItems(['采用各围檩 Span','手动统一分配长度']);controls['distribution_mode']=mode;bf.insertRow(3,'荷载分配方式',mode)
+    mode.currentIndexChanged.connect(lambda *_:self.update_connection_controls());controls['distribution_length_m'].setEnabled(False)
+   enabled.toggled.connect(lambda *_:self.update_connection_controls());self.connection_controls[kind]=controls;cards.addWidget(box,1)
+  pl.addLayout(cards)
+  bracket_box=QGroupBox('托架 — 钢板桩焊缝');bracket_form=QFormLayout(bracket_box);bracket_form.setSpacing(12);self.bracket_weld_controls={}
+  bracket_form.addRow(QLabel('以下参数统一用于 Bracket 页已录入的托架；无需重复填写托架编号。'))
+  for key,label in [('leg_mm','焊脚（mm）'),('strength_mpa','焊缝强度（MPa）'),('effective_length_mm','总有效焊长（mm）')]:
+   field=QLineEdit();field.setPlaceholderText('请输入');field.textChanged.connect(lambda *_:self.changed.emit());self.bracket_weld_controls[key]=field;bracket_form.addRow(label,field)
+  pl.addWidget(bracket_box);self.legacy_notice=QLabel();self.legacy_notice.setWordWrap(True);pl.addWidget(self.legacy_notice);pl.addStretch();scroll=QScrollArea();scroll.setWidgetResizable(True);scroll.setWidget(page);self.tabs.addTab(scroll,'Weld 连接验算')
+  bp=QWidget();bl=QVBoxLayout(bp);bl.setContentsMargins(12,12,12,12);bl.setSpacing(12)
+  label=QLabel('悬臂点荷载：托架承担其间距范围内的围檩自重及自身自重；围檩合力作用点固定为托架长度 L/2。焊缝参数在 Weld 页填写，工况沿用页面顶部设置。');label.setWordWrap(True);bl.addWidget(label)
+  self.brackets=QTableWidget(0,len(BRACKET_FIELDS));self.brackets.setHorizontalHeaderLabels(['托架编号','工况','关联围檩','围檩工况','截面（输入搜索）','钢材','托架长度\nm','托架间距\nm','受力模型','围檩重心距墙\nm','焊脚\nmm','焊缝强度\nMPa','总有效焊长\nmm']);self.style_table(self.brackets,BRACKET_FIELDS);bl.addWidget(self.brackets,1)
+  for key in ('case','waler_case','load_model','eccentricity_m','leg_mm','strength_mpa','effective_length_mm'):self.brackets.setColumnHidden(BRACKET_FIELDS.index(key),True)
+  buttons=QHBoxLayout()
+  for title,action in [('增加托架',lambda:self.add_bracket()),('删除选中托架',lambda:self.delete_rows(self.brackets))]:
+   button=QPushButton(title);button.clicked.connect(action);buttons.addWidget(button)
+  buttons.addStretch();bl.addLayout(buttons);self.brackets.itemChanged.connect(self.emit_changed);self.tabs.addTab(bp,'Bracket 托架')
+  cp=QWidget();cl=QVBoxLayout(cp);cl.setContentsMargins(16,16,16,16);cg=QGroupBox('Blinding concrete');cf=QFormLayout(cg);cf.setSpacing(12)
+  self.include_blinding=QCheckBox('生成 Blinding 验算（使用钢板桩页的未分项剪力）');cf.addRow(self.include_blinding);self.thickness=QLineEdit();self.thickness.setPlaceholderText('输入厚度，单位 mm');cf.addRow('混凝土厚度（mm）',self.thickness);cf.addRow(QLabel('fcu 沿用参考方法 20 MPa；有效长度取基坑短边。'));cl.addWidget(cg);cl.addStretch();self.tabs.addTab(cp,'Blinding 垫层')
+  self.result=QTextEdit();self.result.setReadOnly(True);self.result.setMaximumHeight(90);layout.addWidget(self.result)
+  self.result.hide();self.result.textChanged.connect(lambda:self.result.setVisible(bool(self.result.toPlainText().strip())))
+  self.thickness.textEdited.connect(lambda *_:self.include_blinding.setChecked(True))
+  for field in (self.source,self.thickness,self.case_name):field.textChanged.connect(lambda *_:self.changed.emit())
+  self.case_name.editingFinished.connect(self.apply_case)
   self.combined.toggled.connect(lambda *_:self.changed.emit());self.include_blinding.toggled.connect(lambda *_:self.changed.emit())
-  self.include_blinding.toggled.connect(self.thickness.setEnabled);self.thickness.setEnabled(False)
-  self.welds.itemChanged.connect(self.emit_changed)
+  self.update_connection_controls()
+  self.apply_editor_style()
+ def apply_editor_style(self):
+  from .theme import workbench_style
+  self.setStyleSheet(workbench_style())
+  for index in range(self.tabs.count()):
+   page=self.tabs.widget(index);page=page.widget() if isinstance(page,QScrollArea) else page;page.setProperty('surface',True)
+ def style_table(self,table,fields):
+  table.setAlternatingRowColors(True);table.verticalHeader().setDefaultSectionSize(38);table.horizontalHeader().setMinimumHeight(58);table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive);table.horizontalHeader().setDefaultSectionSize(108);table.horizontalHeader().setMinimumSectionSize(65)
+  table.setItemDelegate(EngineeringNumbers(fields,table));table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+  for index,key in enumerate(fields):
+   table.setColumnWidth(index,175 if key in ('section','source_strut') else 155 if key=='use_default_k' else 135 if key=='lx_equals_ly' else 95 if key in ('member_id','bracket_id','grade') else 75 if key in ('kx','ky','klt') else 110)
+ def update_connection_controls(self):
+  for controls in self.connection_controls.values():
+   for key,field in controls.items():
+    if key=='enabled':continue
+    field.setEnabled(key!='distribution_length_m' or controls['distribution_mode'].currentIndex()==1)
+    if key=='distribution_length_m':field.setPlaceholderText('采用各围檩 Span 自动填写' if controls['distribution_mode'].currentIndex()==0 else '请输入统一分配长度')
+  self.changed.emit()
+ def collect_groups(self):
+  groups=[]
+  for kind,controls in self.connection_controls.items():
+   group=dict(kind=kind,enabled=controls['enabled'].isChecked())
+   for key,field in controls.items():
+    if key=='enabled':continue
+    if key=='distribution_mode':group[key]='span' if field.currentIndex()==0 else 'manual';continue
+    value=field.text().strip()
+    try:group[key]=float(value) if value else None
+    except ValueError:
+     if group['enabled']:raise ValueError(f'{kind} {key}须为数字')
+     group[key]=value
+   groups.append(group)
+  return groups
+ def apply_case(self):
+  if self.busy:return
+  case=self.case_name.text().strip()
+  if not case or case==self._case_synced:return
+  self.busy=True
+  for table,fields in [(self.struts,STRUT_FIELDS),(self.walers,WALER_FIELDS),(self.brackets,BRACKET_FIELDS),(self.welds,WELD_FIELDS)]:
+   for row in range(table.rowCount()):
+    table.item(row,fields.index('case')).setText(case)
+    if 'waler_case' in fields:table.item(row,fields.index('waler_case')).setText(case)
+    if 'source_strut' in fields:
+     combo=table.cellWidget(row,fields.index('source_strut'));old=combo.currentText();parts=old.split(' / ')
+     if len(parts)==2:combo.setProperty('restore_value',parts[0]+' / '+case);combo.setCurrentText('选择关联支撑')
+  self._case_synced=case;self._multi_case=False;self.case_notice.hide();self.busy=False;self.refresh();self.changed.emit()
+  for table,fields in [(self.struts,STRUT_FIELDS),(self.walers,WALER_FIELDS),(self.brackets,BRACKET_FIELDS)]:table.setColumnHidden(fields.index('case'),True)
  def member_page(self,kind,fields,headers):
   page=QWidget();layout=QVBoxLayout(page)
-  layout.addWidget(QLabel('Strut：墙法线力按kN输入；角度为支撑轴线与墙法线的夹角，角撑轴力除以cos(角度)。Strut length用于自重验算，Lx默认跟随该长度。' if kind=='Strut' else 'Waling：选择关联支撑，荷载宽度自动取其间距，分布荷载自动由支撑力／间距得到；Span手动输入，整段按此均布荷载计算。'))
-  table=QTableWidget(0,len(fields));table.setHorizontalHeaderLabels(headers);table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents);layout.addWidget(table)
+  note=QLabel('Strut：墙法线力按kN输入；角度为支撑轴线与墙法线的夹角，角撑轴力除以cos(角度)。Strut length用于自重验算，Lx默认跟随该长度。' if kind=='Strut' else 'Waling：选择关联支撑，荷载宽度自动取其间距，分布荷载由支撑力／间距得到；Span手动输入。');note.setWordWrap(True);layout.addWidget(note)
+  table=QTableWidget(0,len(fields));table.setHorizontalHeaderLabels(headers);self.style_table(table,fields);table.setColumnHidden(fields.index('case'),True);layout.addWidget(table)
   buttons=QHBoxLayout();layout.addLayout(buttons)
   for label,action in [('增加支撑／角撑' if kind=='Strut' else '增加围檩',lambda checked=False,k=kind:self.add_member(k)),('按选中行批量新增',lambda checked=False,k=kind:self.bulk_dialog(k)),('删除选中行',lambda checked=False,t=table:self.delete_rows(t))]:
    b=QPushButton(label);b.clicked.connect(action);buttons.addWidget(b)
@@ -66,6 +147,8 @@ class SupportEditor(QWidget):
   combo.setCurrentText(value or '请选择');combo.currentTextChanged.connect(self.emit_changed);return combo
  def add_member(self,kind,record=None):
   record=dict(record or {});table=self.struts if kind=='Strut' else self.walers;fields=STRUT_FIELDS if kind=='Strut' else WALER_FIELDS
+  record.setdefault('case',self.case_name.text().strip() or 'LC1')
+  record.setdefault('use_default_k',all(record.get(k,1) in (1,1.0,'1','1.0') for k in ('kx','ky','klt')))
   if not record.get('member_id'):record['member_id']=self.next_id(kind)
   row=table.rowCount();self.busy=True;table.insertRow(row)
   for col,key in enumerate(fields):
@@ -73,8 +156,8 @@ class SupportEditor(QWidget):
    if key=='section':table.setCellWidget(row,col,self.section_combo(str(value)))
    elif key in ('grade','source_strut'):
     combo=QComboBox();combo.addItems(['请选择','S235','S275','S355','S460'] if key=='grade' else ['选择关联支撑']);combo.setCurrentText(str(value));combo.setProperty('restore_value',str(value));combo.currentTextChanged.connect(self.emit_changed);table.setCellWidget(row,col,combo)
-   elif key=='lx_equals_ly':
-    box=QCheckBox();box.setChecked(bool(value));box.toggled.connect(self.emit_changed);table.setCellWidget(row,col,box)
+   elif key in ('lx_equals_ly','use_default_k'):
+    box=QCheckBox('Lx = Ly' if key=='lx_equals_ly' else '设置默认值');box.setChecked(bool(value));box.setToolTip('勾选后 Ly 跟随 Lx，不能单独修改' if key=='lx_equals_ly' else '勾选：Kx、Ky、KLT 固定为 1；取消勾选后可自行输入');box.toggled.connect(self.emit_changed);table.setCellWidget(row,col,box)
    else:table.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
   if kind=='Strut':table.item(row,fields.index('lx_m')).setData(Qt.ItemDataRole.UserRole,record.get('lx_is_default',record.get('lx_m') in ('',None)))
   self.busy=False;self.refresh();self.changed.emit()
@@ -119,6 +202,12 @@ class SupportEditor(QWidget):
      linked=table.cellWidget(row,fields.index('lx_equals_ly')).isChecked();lx=self.text(table,row,fields.index('lx_m'));ly=table.item(row,fields.index('ly_m'))
      if linked:ly.setText(lx)
      ly.setFlags(ly.flags() & ~Qt.ItemFlag.ItemIsEditable if linked else ly.flags() | Qt.ItemFlag.ItemIsEditable)
+     use_default=table.cellWidget(row,fields.index('use_default_k')).isChecked()
+     for key in ('kx','ky','klt'):
+      item=table.item(row,fields.index(key))
+      if use_default:item.setText('1')
+      item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable if use_default else item.flags() | Qt.ItemFlag.ItemIsEditable)
+      item.setToolTip('默认值 1；取消“设置默认值”后可编辑' if use_default else '自定义 K 系数')
    struts={m['member_id']+' / '+m['case']:m for m in self.read_rows(self.struts,STRUT_FIELDS,False) if m['member_id'] and m['case']}
    for row in range(self.walers.rowCount()):
     combo=self.walers.cellWidget(row,WALER_FIELDS.index('source_strut'));chosen=combo.currentText();restored=combo.property('restore_value')
@@ -161,6 +250,13 @@ class SupportEditor(QWidget):
     combo=QComboBox();combo.addItems(['Strut-Waler','Waler-Sheetpile']);combo.setCurrentText(record.get(key,'Strut-Waler'));combo.currentTextChanged.connect(self.update_welds);self.welds.setCellWidget(row,col,combo)
    else:self.welds.setItem(row,col,QTableWidgetItem('' if record.get(key) is None else str(record.get(key,''))))
   self.busy=False;self.update_welds()
+  if record:
+   controls=self.connection_controls[record.get('kind','Strut-Waler')];controls['enabled'].setChecked(True)
+   for key,field in controls.items():
+    if key in ('enabled','distribution_mode'):continue
+    value=record.get(key)
+    if value is not None:field.setText(str(value))
+   if 'distribution_mode' in controls:controls['distribution_mode'].setCurrentIndex(1 if record.get('distribution_length_m') else 0)
  def update_welds(self,*args):
   self.busy=True
   for row in range(self.welds.rowCount()):
@@ -188,6 +284,7 @@ class SupportEditor(QWidget):
   existing={self.text(self.brackets,r,0) for r in range(row)};number=1
   while 'B'+str(number) in existing:number+=1
   record.setdefault('bracket_id','B'+str(number))
+  record.setdefault('case',self.case_name.text().strip() or 'LC1');record.setdefault('waler_case',self.case_name.text().strip() or 'LC1')
   record.setdefault('load_model','point')
   for col,key in enumerate(BRACKET_FIELDS):
    value=record.get(key,'')
@@ -197,6 +294,8 @@ class SupportEditor(QWidget):
    else:self.brackets.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
   self.busy=False;self.changed.emit()
  def collect(self,length,width):
+  self.apply_case()
+  if not self.case_name.text().strip() and not self._multi_case:raise ValueError('请在页面顶部填写统一工况')
   self.refresh();members=[]
   for row,m in enumerate(self.read_rows(self.struts,STRUT_FIELDS)):
    m['kind']='Strut';m['lx_is_default']=bool(self.struts.item(row,STRUT_FIELDS.index('lx_m')).data(Qt.ItemDataRole.UserRole));members.append(m)
@@ -204,9 +303,23 @@ class SupportEditor(QWidget):
    source=m.pop('source_strut');parts=source.split(' / ');m.update(kind='Waler',angle_deg=0.0,source_strut_id=parts[0] if len(parts)==2 else '',source_strut_case=parts[1] if len(parts)==2 else '');members.append(m)
   try:thickness=float(self.thickness.text()) if self.thickness.text().strip() else None
   except ValueError:raise ValueError('Blinding厚度须为数字')
-  return dict(schema_version=2,connection_template=AA_CONNECTIONS,brackets=self.read_rows(self.brackets,BRACKET_FIELDS),enabled=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
+  brackets=self.read_rows(self.brackets,BRACKET_FIELDS)
+  for b in brackets:
+   b['eccentricity_m']=b['length_m']/2 if isinstance(b.get('length_m'),(float,int)) else None
+   for key,field in self.bracket_weld_controls.items():
+    try:b[key]=float(field.text()) if field.text().strip() else None
+    except ValueError:raise ValueError(f'托架焊缝 {key}须为数字')
+  return dict(schema_version=2,case_name=self.case_name.text().strip(),connection_groups=self.collect_groups(),connection_template=AA_CONNECTIONS,brackets=brackets,enabled=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
  def load(self,record):
   self.struts.setRowCount(0);self.walers.setRowCount(0);self.welds.setRowCount(0);self.brackets.setRowCount(0)
+  cases=list(dict.fromkeys(m.get('case','LC1') for m in record.get('members',[])))
+  self._multi_case=len(cases)>1;case=record.get('case_name') or (cases[0] if len(cases)==1 else '' if cases else 'LC1');self._case_synced=case;self.case_name.setText(case)
+  self.case_notice.setText('已保留历史多个工况。顶部输入统一工况后，才会统一替换；构件内力保留。' if self._multi_case else '');self.case_notice.setVisible(self._multi_case)
+  for table,fields in [(self.struts,STRUT_FIELDS),(self.walers,WALER_FIELDS),(self.brackets,BRACKET_FIELDS)]:table.setColumnHidden(fields.index('case'),not self._multi_case)
+  for controls in self.connection_controls.values():
+   controls['enabled'].setChecked(False)
+   for key,field in controls.items():
+    if isinstance(field,QLineEdit):field.clear()
   self.combined.setChecked(bool(record.get('enabled',False)));self.source.setText(record.get('source',''));self.include_blinding.setChecked(record.get('include_blinding',record.get('blinding_thickness_mm') is not None));self.thickness.setText('' if record.get('blinding_thickness_mm') is None else str(record['blinding_thickness_mm']))
   for m in record.get('members',[]):
    if m['kind']=='Strut':self.add_member('Strut',m)
@@ -215,3 +328,24 @@ class SupportEditor(QWidget):
     row=dict(m);row['source_strut']=row.get('source_strut_id','')+' / '+row.get('source_strut_case','');self.add_member('Waler',row)
   for w in record.get('welds',[]):self.add_weld(w)
   for b in record.get('brackets',[]):self.add_bracket(b)
+  for key,field in self.bracket_weld_controls.items():
+   values={b.get(key) for b in record.get('brackets',[])};value=values.pop() if len(values)==1 else None
+   field.setText('' if value is None else str(value))
+  if any(len({b.get(key) for b in record.get('brackets',[])})>1 for key in self.bracket_weld_controls):
+   self.legacy_notice.setText('历史托架的焊缝参数不一致，请在本页填写统一参数后生成。')
+  groups=record.get('connection_groups')
+  if groups is None:
+   groups=[]
+   for kind in self.connection_controls:
+    rows=[w for w in record.get('welds',[]) if w.get('kind')==kind]
+    if not rows:continue
+    group=dict(kind=kind,enabled=True,distribution_mode='manual')
+    for key in ('leg_mm','strength_mpa','effective_length_mm','distribution_length_m'):
+     values={w.get(key) for w in rows};group[key]=values.pop() if len(values)==1 else None
+    groups.append(group)
+  for group in groups:
+   controls=self.connection_controls[group['kind']];controls['enabled'].setChecked(group.get('enabled',False))
+   for key,field in controls.items():
+    if isinstance(field,QLineEdit):field.setText('' if group.get(key) is None else str(group[key]))
+   if 'distribution_mode' in controls:controls['distribution_mode'].setCurrentIndex(0 if group.get('distribution_mode')=='span' else 1)
+  self.update_connection_controls()

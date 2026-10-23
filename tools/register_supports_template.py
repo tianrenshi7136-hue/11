@@ -20,5 +20,8 @@ def main():
     if name not in book.sheetnames:raise ValueError('Missing AA worksheet: '+name)
   finally:book.close()
  config={'schema_version':2,'blinding_file':str(source),'blinding_sha256':fingerprint,'connection_file':str(source),'connection_sha256':fingerprint,'expected_formulas':formulas,'approved_source':'Engineer-selected AA Connection check, Bracket and Blinding worksheets; controlled load links and comparison repairs'}
- destination=ROOT/'templates/supports-structure.local.json';destination.write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8');print(destination)
+ destination=ROOT/'templates/supports-structure.local.json';destination.write_text(json.dumps(config,ensure_ascii=False,indent=2),encoding='utf-8')
+ from els.reference_store import reference_file
+ reference_file(destination,source=source)
+ print(destination)
 if __name__=='__main__':main()

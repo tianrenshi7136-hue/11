@@ -62,7 +62,18 @@ def resolve_package(package):
     return result
 
 
-def section_library():
+def section_library(aa=False):
+    if aa:
+        from tempfile import TemporaryDirectory
+        from openpyxl import load_workbook
+        from .connections import copy_source
+        registry=json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf8'))
+        with TemporaryDirectory(prefix='els-aa-sections-') as folder:
+            snapshot=Path(folder)/'aa.xlsx';copy_source(registry.get('connection_file',registry['blinding_file']),snapshot)
+            book=load_workbook(snapshot,read_only=True,data_only=True,keep_links=False)
+            try:
+                return [r[0] for r in book['Section Table UC'].iter_rows(min_row=5,max_row=128,max_col=1,values_only=True) if isinstance(r[0],str) and 'x' in r[0]]
+            finally:book.close()
     import xlrd
     config = json.loads((ROOT / 'templates/sheetpile-structure.local.json').read_text(encoding='utf-8'))
     b = xlrd.open_workbook(config['file'])
@@ -131,6 +142,12 @@ def validate_package(package, library=None):
     for key in (('length_m', 'width_m', 'blinding_thickness_mm') if package.get('include_blinding',True) else ()):
         if not finite(package.get(key)) or package[key] <= 0:
             errors.append(f'{key}须填写正数；垫层有效长度取基坑短边')
+    from .connections import AA_CONNECTIONS, validate_brackets
+    if package.get('connection_template') not in (None, AA_CONNECTIONS):
+        errors.append('不支持的连接模板版本')
+    if package.get('brackets') and package.get('connection_template') != AA_CONNECTIONS:
+        errors.append('托架须使用AA连接模板')
+    errors.extend(validate_brackets(package, library))
     if not isinstance(package.get('source'), str) or not package['source'].strip():
         errors.append('请填写anchor force分析来源及版本')
     return errors
@@ -171,6 +188,9 @@ def page_style(ws, project, subject, last_row, app):
     ws.Visible = -1
     ws.Range('D3').Value2 = "'" + project
     ws.Range('D4').Value2 = "'" + subject
+    ws.Range('Q4').NumberFormat = '[$-409]dd-mmm-yy'
+    ws.Range('Q4').ShrinkToFit = True
+    ws.Range('Q4').Font.Size = 8
     for address in ('R3', 'V3', 'AB3', 'AG3', 'V4', 'AB4'):
         ws.Range(address).MergeArea.ClearContents()
     for index in range(ws.Shapes.Count, 0, -1):
@@ -207,7 +227,8 @@ def report_row(ws, row, values, ranges, header=False):
 
 def populate(wb, package, actions, project, subject):
     package=resolve_package(package)
-    errors = validate_package(package, section_library())
+    from .connections import AA_CONNECTIONS
+    errors = validate_package(package, section_library(aa=package.get('connection_template')==AA_CONNECTIONS))
     if errors:
         raise ValueError('\n'.join(errors))
     app = wb.Application
@@ -215,8 +236,6 @@ def populate(wb, package, actions, project, subject):
     if include_blinding:
         registry = json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf-8'))
         blinding_file=Path(registry['blinding_file'])
-        if sha256(blinding_file) != registry['blinding_sha256']:
-            raise ValueError('Blinding模板指纹变化，请重新审查及登记')
     output, results, member_sheets = [], [], {}
     def copy_sheet(name):
         source = wb.Worksheets(name)
@@ -298,19 +317,29 @@ def populate(wb, package, actions, project, subject):
     inputs.Visible=2
     output.insert(0,summary.Name)
     weld_results=[]
-    if package.get('welds'):
+    bracket_results=[]
+    connection_hash=None
+    if package.get('welds') or package.get('brackets'):
         weld_sheet=copy_sheet('Connection check')
         weld_sheet.Name='Connection Checks'
-        weld_results,weld_last=build_welds(wb,weld_sheet,package,member_sheets,numeric)
+        from .connections import AA_CONNECTIONS, build_aa_connections
+        if package.get('connection_template') == AA_CONNECTIONS:
+            weld_results,bracket_results,weld_last,connection_hash=build_aa_connections(wb,weld_sheet,package,member_sheets,numeric)
+        else:
+            weld_results,weld_last=build_welds(wb,weld_sheet,package,member_sheets,numeric)
         page_style(weld_sheet,project,subject,weld_last,app)
         output.append(weld_sheet.Name)
+        for bracket in bracket_results:
+            detail=wb.Worksheets(bracket['calculation_sheet'])
+            detail.Visible=-1
+            page_style(detail,project,subject,51,app)
+            output.append(detail.Name)
     expected=None
     source_hash=None
     if include_blinding:
         # Copy only the engineer-selected Blinding worksheet from the separate source.
-        source_hash=sha256(blinding_file)
-        other=app.Workbooks.Open(str(blinding_file.resolve()),UpdateLinks=0,ReadOnly=True,AddToMru=False)
-        try:
+        from .connections import controlled_source
+        with controlled_source(app,blinding_file,registry['blinding_sha256']) as (other,source_hash):
             # XLS has 65,536 rows: copy the controlled region of the XLSX source.
             blind=copy_sheet('Blinding')
             blind.Range('A1:AH100').UnMerge()
@@ -324,8 +353,6 @@ def populate(wb, package, actions, project, subject):
                 blind.Columns(col).ColumnWidth=source_blind.Columns(col).ColumnWidth
             for row in range(1,28):
                 blind.Rows(row).RowHeight=source_blind.Rows(row).RowHeight
-        finally:
-            other.Close(False)
         blind.Name='Blinding Concrete'
         blind.Range('D8').Formula="='FSPiv Summary'!F50"
         blind.Range('H9').Value2=1.4
@@ -346,15 +373,14 @@ def populate(wb, package, actions, project, subject):
         for cell,value in [('N9',expected['demand_kn_per_m']),('C22',expected['capacities_kn_per_m'][0]),('C26',expected['capacities_kn_per_m'][1])]:
             if not math.isclose(numeric(blind,cell),value,rel_tol=1e-9):
                 raise ValueError('Blinding公式与独立算式不一致')
-        if sha256(blinding_file)!=source_hash:
-            raise ValueError('Blinding源文件在生成期间变化')
         output.append(blind.Name)
     basis = ('Unfactored normal strut force kN; axial force = 1.4F/cos(angle); linked waler q = F/spacing; '
              if package.get('schema_version') == 2 else
              'Unfactored anchor force kN/m; strut axial force = 1.4q*load width/cos(angle); ')
-    result={'members':results,'welds':weld_results,'blinding':expected,'blinding_source_sha256':source_hash,
+    result={'members':results,'welds':weld_results,'brackets':bracket_results,'connection_source_sha256':connection_hash,'blinding':expected,'blinding_source_sha256':source_hash,
             'assumptions':basis+'Template selfweight and concentric fillet welds.'}
     failures=[m['sheet'] for m in results if m['status']=='FAIL']+[w['input']['member_id']+' weld' for w in weld_results if w['status']=='FAIL']
+    failures.extend(b['input']['bracket_id']+' bracket' for b in bracket_results if b['status']=='FAIL')
     if expected and expected['status']=='FAIL':
         failures.append('Blinding Concrete')
     if failures:
@@ -368,20 +394,33 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
     import uuid
     from datetime import datetime
     from .sheetpile import excel_session, check_template, envelope
-    errors=validate_package(package,section_library())
+    from .connections import AA_CONNECTIONS
+    errors=validate_package(package,section_library(aa=package.get('connection_template')==AA_CONNECTIONS))
     if errors:raise ValueError('\n'.join(errors))
     if not project_name.strip() or not subject_name.strip() or re.search(r'[\u3400-\u9fff]',project_name+subject_name):raise ValueError('请填写英文Project Name及Subject Name')
     actions={'v':0.0}
     if package.get('include_blinding',True):
         if not steel_request:raise ValueError('生成Blinding需先填写钢板桩剪力，或取消Blinding勾选')
         actions=envelope(steel_request)
-    mapping=json.loads(Path(mapping_path).read_text(encoding='utf8'));source=Path(mapping['file']);before=sha256(source)
-    if before!=mapping['sha256']:raise ValueError('模板指纹变化，请重新审查登记')
+    from .connections import AA_CONNECTIONS,copy_source,prepare_aa_workbook
+    aa=package.get('connection_template')==AA_CONNECTIONS
+    if aa:
+        registry=json.loads((ROOT/'templates/supports-structure.local.json').read_text(encoding='utf8'))
+        source=Path(registry.get('connection_file',registry['blinding_file']))
+        expected_hash=registry.get('connection_sha256',registry['blinding_sha256'])
+    else:
+        mapping=json.loads(Path(mapping_path).read_text(encoding='utf8'))
+        source=Path(mapping['file']);expected_hash=mapping['sha256']
     folder=Path(output_root)/(datetime.now().strftime('%Y%m%d-%H%M%S')+'-'+uuid.uuid4().hex[:6]);folder.mkdir(parents=True,exist_ok=False)
-    target=folder/'Waling_Strut_Check_Review.xls';pdf=folder/'Waling_Strut_Check_Review.pdf';shutil.copy2(source,target)
+    target=folder/('Waling_Strut_Check_Review.xlsx' if aa else 'Waling_Strut_Check_Review.xls');pdf=folder/'Waling_Strut_Check_Review.pdf'
     try:
+        if aa:copy_source(source,target)
+        else:shutil.copy2(source,target)
+        before=sha256(target)
+        if before!=expected_hash:raise ValueError('模板指纹变化，请重新审查登记')
         with excel_session(target) as (app,wb):
-            check_template(wb)
+            if aa:prepare_aa_workbook(wb)
+            else:check_template(wb)
             main=wb.Worksheets('FSPiv Summary');main.Visible=-1
             for ws in wb.Worksheets:
                 if ws.Name!=main.Name:ws.Visible=2
@@ -405,7 +444,12 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                 except Exception:bad=None
                 if bad is not None:raise ValueError(f'{name}打印区域存在公式错误：{bad.Address}')
             wb.Save();wb.ExportAsFixedFormat(0,str(pdf.resolve()))
-        if sha256(source)!=before:raise ValueError('原模板在生成期间变化')
+        if aa:
+            from tempfile import TemporaryDirectory
+            with TemporaryDirectory(prefix='els-aa-hash-') as temporary:
+                snapshot=Path(temporary)/'aa.xlsx';copy_source(source,snapshot)
+                if sha256(snapshot)!=before:raise ValueError('原模板在生成期间变化')
+        elif sha256(source)!=before:raise ValueError('原模板在生成期间变化')
         result={'module':'support_structure','request':package,'project_name':project_name,'subject_name':subject_name,
                 'steel_request':steel_request if package.get('include_blinding',True) else None,
                 'template_sha256':before,'output_sheets':names,'support_package_results':checks,

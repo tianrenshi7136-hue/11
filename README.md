@@ -66,7 +66,7 @@
 
 SQLite数据库位于data/projects.sqlite3。平面示意只显示构件坐标，不表达支撑连接和几何跨度，不能作为设计图。
 
-## 围檩与支撑计算书（v0.4）
+## 围檩与支撑计算书（v0.5）
 
 进入“围檩／支撑计算书”，页面顶部有“生成围檩／支撑计算书及 PDF”按钮。独立生成不要求先填写钢板桩参数。勾选“在钢板桩计算书中同时加入”后，也可由钢板桩页生成同一本联动计算书。
 
@@ -76,7 +76,13 @@ SQLite数据库位于data/projects.sqlite3。平面示意只显示构件坐标�
 - 焊缝区域有记录时自动加入连接验算，没有记录时仅生成构件验算。连接范围仍为直接无偏心支撑／角撑—围檩、围檩—钢板桩角焊缝。
 - Blinding为可选项。勾选后使用钢板桩页剪力包络、项目短边及用户输入厚度，仍采用工程师指定的Blinding模板。未勾选时不要求钢板桩数据、基坑长宽或垫层厚度。
 
-独立成果位于outputs/supports的版本目录，文件名Waling_Strut_Check_Review.xls/.pdf。输入修改后原成果标记过期；从软件重新生成新版本，以保持结果记录与文件一致。源模板与既有成果保留。
+新版独立生成直接使用工程师指定的Structural capacity AA section.xlsx及其中的构件、截面库、Connection check和Bracket工作表，输出XLSX与PDF，不再先打开旧XLS。成果位于outputs/supports的版本目录，文件名Waling_Strut_Check_Review.xlsx/.pdf。输入修改后原成果标记过期；从软件重新生成新版本，以保持结果记录与文件一致。源模板与既有成果保留。
+
+Weld／Bracket／Blinding区域新增托架输入：关联围檩及工况、托架截面及材料、托架长度、托架间距、围檩重心到墙距离、焊脚、焊缝强度及总有效焊长。围檩重量为其每米自重乘托架间距；设计剪力为1.4倍围檩重量加1.4倍托架自重，设计弯矩为围檩设计重量乘重心距墙力臂，再加托架自重的悬臂均布荷载弯矩。0.5m仅为原案例的重心力臂，不再当作荷载宽度。
+
+围檩—钢板桩、托架及其连接、支撑／角撑—围檩的连接验算集中在Connection Checks同一页，保留模板三段结构。完整托架构件剪力、弯矩、截面及屈曲验算采用AA模板的Bracket页，作为独立明细页输出。托架焊缝沿用模板的直接剪力比较，未增加焊缝群弯矩传递验算；这一范围在托架明细页明确注明。旧模板的固定OK与失效项目引用不沿用。
+
+AA模板登记与指纹保存在本机templates/supports-structure.local.json；需要接入修改后的模板时，先审查，再运行python -m tools.register_supports_template。原文件只读取快照，验证期间请先保存关闭，避免自动保存改变指纹。软件验证脚本为tools.verify_aa_connections_excel与tools.verify_aa_connection_links。
 
 旧项目的支撑kN/m值按原间距转换为墙法线力kN，保留原计算轴力和自重长度；能唯一识别的围檩关联自动恢复，无法唯一识别时需手动选择关联支撑。Excel验证脚本包括tools.verify_supports_v2_excel及tools.verify_support_button，要求本机已登记模板和已有基准样例。
 

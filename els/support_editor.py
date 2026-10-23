@@ -5,11 +5,12 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QCheckBox,
  QTableWidget,QTableWidgetItem,QComboBox,QCompleter,QHeaderView,QPushButton,QTabWidget,
  QFormLayout,QTextEdit,QInputDialog,QMessageBox)
+from .connections import AA_CONNECTIONS, BRACKET_FIELDS
 
 STRUT_FIELDS=('member_id','case','section','grade','anchor_kn','spacing_m','angle_deg','strut_length_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt')
 WALER_FIELDS=('member_id','case','section','grade','source_strut','anchor_kn_per_m','load_width_m','load_span_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt')
 WELD_FIELDS=('member_id','case','kind','leg_mm','strength_mpa','effective_length_mm','distribution_length_m')
-TEXT_FIELDS={'member_id','case','section','grade','source_strut','kind'}
+TEXT_FIELDS={'member_id','case','section','grade','source_strut','kind','bracket_id','waler_id','waler_case','load_model'}
 
 class SupportEditor(QWidget):
  changed=Signal()
@@ -28,9 +29,17 @@ class SupportEditor(QWidget):
   for label,action in [('增加焊缝',lambda:self.add_weld()),('删除选中焊缝',lambda:self.delete_rows(self.welds))]:
    b=QPushButton(label);b.clicked.connect(action);buttons.addWidget(b)
   el.addWidget(QLabel('录入焊缝后生成时自动加入；不填写则只生成构件验算。支撑焊长自动计算，围檩焊长按每米墙宽输入。'))
+  bracket_label=QLabel('Bracket：承担托架间距范围内的围檩自重及自身自重。围檩重心距墙为力臂（原表0.5m），与托架长度分开输入；采用AA文件的Bracket工作表验算构件。');bracket_label.setWordWrap(True);el.addWidget(bracket_label)
+  self.brackets=QTableWidget(0,len(BRACKET_FIELDS));self.brackets.setHorizontalHeaderLabels(['托架编号','工况','围檩编号','围檩工况','截面（输入搜索）','钢材','托架长度\nm','托架间距\nm','受力模型','围檩重心距墙\nm','焊脚\nmm','焊缝强度\nMPa','总有效焊长\nmm'])
+  self.brackets.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents);el.addWidget(self.brackets)
+  self.brackets.setColumnHidden(BRACKET_FIELDS.index('load_model'),True)
+  bracket_buttons=QHBoxLayout();el.addLayout(bracket_buttons)
+  for label,action in [('增加托架',lambda:self.add_bracket()),('删除选中托架',lambda:self.delete_rows(self.brackets))]:
+   button=QPushButton(label);button.clicked.connect(action);bracket_buttons.addWidget(button)
+  self.brackets.itemChanged.connect(self.emit_changed)
   self.include_blinding=QCheckBox('同时生成 Blinding（使用钢板桩页面的未分项剪力）');el.addWidget(self.include_blinding)
   form=QFormLayout();self.thickness=QLineEdit();self.thickness.setPlaceholderText('输入厚度 mm，fcu沿用模板20 MPa');form.addRow('Blinding厚度 mm',self.thickness);el.addLayout(form)
-  self.tabs.addTab(extra,'焊缝／Blinding')
+  self.tabs.addTab(extra,'Weld／Bracket／Blinding')
   self.generate=QPushButton('生成围檩／支撑计算书及 PDF');self.generate.setMinimumHeight(38);self.generate.clicked.connect(lambda *_:self.generate_requested.emit());layout.addWidget(self.generate)
   layout.removeWidget(self.generate);layout.insertWidget(2,self.generate)
   self.result=QTextEdit();self.result.setReadOnly(True);self.result.setMaximumHeight(100);layout.addWidget(self.result)
@@ -174,6 +183,19 @@ class SupportEditor(QWidget):
      except ValueError:raise ValueError(f'焊缝第{row+1}项 {key}须为数字')
    records.append(record)
   return records
+ def add_bracket(self,record=None):
+  record=dict(record or {});row=self.brackets.rowCount();self.busy=True;self.brackets.insertRow(row)
+  existing={self.text(self.brackets,r,0) for r in range(row)};number=1
+  while 'B'+str(number) in existing:number+=1
+  record.setdefault('bracket_id','B'+str(number))
+  record.setdefault('load_model','point')
+  for col,key in enumerate(BRACKET_FIELDS):
+   value=record.get(key,'')
+   if key=='section':self.brackets.setCellWidget(row,col,self.section_combo(value))
+   elif key in ('grade','load_model'):
+    combo=QComboBox();combo.addItems(['请选择','S235','S275','S355','S460'] if key=='grade' else ['选择受力模型','point']);combo.setCurrentText(str(value));combo.currentTextChanged.connect(self.emit_changed);self.brackets.setCellWidget(row,col,combo)
+   else:self.brackets.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
+  self.busy=False;self.changed.emit()
  def collect(self,length,width):
   self.refresh();members=[]
   for row,m in enumerate(self.read_rows(self.struts,STRUT_FIELDS)):
@@ -182,9 +204,9 @@ class SupportEditor(QWidget):
    source=m.pop('source_strut');parts=source.split(' / ');m.update(kind='Waler',angle_deg=0.0,source_strut_id=parts[0] if len(parts)==2 else '',source_strut_case=parts[1] if len(parts)==2 else '');members.append(m)
   try:thickness=float(self.thickness.text()) if self.thickness.text().strip() else None
   except ValueError:raise ValueError('Blinding厚度须为数字')
-  return dict(schema_version=2,enabled=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
+  return dict(schema_version=2,connection_template=AA_CONNECTIONS,brackets=self.read_rows(self.brackets,BRACKET_FIELDS),enabled=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
  def load(self,record):
-  self.struts.setRowCount(0);self.walers.setRowCount(0);self.welds.setRowCount(0)
+  self.struts.setRowCount(0);self.walers.setRowCount(0);self.welds.setRowCount(0);self.brackets.setRowCount(0)
   self.combined.setChecked(bool(record.get('enabled',False)));self.source.setText(record.get('source',''));self.include_blinding.setChecked(record.get('include_blinding',record.get('blinding_thickness_mm') is not None));self.thickness.setText('' if record.get('blinding_thickness_mm') is None else str(record['blinding_thickness_mm']))
   for m in record.get('members',[]):
    if m['kind']=='Strut':self.add_member('Strut',m)
@@ -192,3 +214,4 @@ class SupportEditor(QWidget):
    if m['kind']=='Waler':
     row=dict(m);row['source_strut']=row.get('source_strut_id','')+' / '+row.get('source_strut_case','');self.add_member('Waler',row)
   for w in record.get('welds',[]):self.add_weld(w)
+  for b in record.get('brackets',[]):self.add_bracket(b)

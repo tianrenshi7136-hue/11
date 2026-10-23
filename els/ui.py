@@ -140,7 +140,7 @@ class Workbench(QMainWindow):
     def __init__(self, database=None):
         configure_fonts()
         super().__init__()
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.4")
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.5")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()
@@ -313,7 +313,7 @@ class Workbench(QMainWindow):
         self.steel_flows.addTab(steel_scroll, '2 指定截面验算')
         tabs.addTab(steel_page, '钢板桩结构计算')
         try:
-            self.support_sections=section_library()
+            self.support_sections=section_library(aa=True)
         except Exception:
             self.support_sections=[]
         self.support_editor=SupportEditor(self.support_sections)
@@ -463,7 +463,7 @@ class Workbench(QMainWindow):
             stale=current!=result['request'] or self.name.text().strip()!=result['project_name'] or self.subject.text().strip()!=result['subject_name']
             if result.get('steel_request') is not None:stale=stale or self.collect_steel()!=result['steel_request']
         except ValueError:stale=True
-        scope='围檩／支撑'+('及焊缝' if result['support_package_results']['welds'] else '')
+        scope='围檩／支撑'+('及连接' if result['support_package_results']['welds'] or result['support_package_results'].get('brackets') else '')
         self.support_result.setPlainText(('输入已修改，该成果已过期。\n' if stale else scope+'模板验算完成。\n')+f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n工作表：{', '.join(result['output_sheets'])}")
         if not stale:self.state.setText('已生成围檩／支撑计算书及PDF；待工程师复核')
 

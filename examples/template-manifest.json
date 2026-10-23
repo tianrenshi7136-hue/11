@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "version": "待接入",
+  "approved": false,
+  "reviewer": "",
+  "rules_reference": "",
+  "excel": {
+    "file": "../templates/calculation.xlsx",
+    "sha256": "待检查后填写",
+    "inputs": [],
+    "checks": []
+  },
+  "cad": {
+    "file": "../templates/drawing.dwg",
+    "sha256": "待检查后填写",
+    "objects": []
+  }
+}

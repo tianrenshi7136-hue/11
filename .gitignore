@@ -1,0 +1,35 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+outputs/
+templates/*
+!templates/README.md
+*.xlsx
+*.xlsm
+*.xls
+*.dwg
+*.pdf
+TWD-TD004/
+新计算书/
+Project/
+
+# Credentials and local tooling state
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.codex/
+.agents/
+
+# Local template diagnostics and disposable preview scripts
+tools/build_template_report.py
+tools/compare_new_templates.py
+tools/debug_copy.py
+tools/inspect_cad_templates.py
+tools/inspect_cw1_reference.py
+tools/inspect_support_layout.py
+tools/probe_sheetpile.py
+tools/render_supports_preview.py
+tools/report_twd_templates.py

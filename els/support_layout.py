@@ -105,7 +105,8 @@ def build_welds(wb,sheet,package,member_sheets,numeric):
     source=wb.Worksheets('Connection check')
     sheet.Range('A7:AH200').UnMerge();sheet.Range('A7:AH200').Clear()
     row=7;results=[]
-    for w in package['welds']:
+    from .critical_connections import governing_welds,force_key,attach_live_selector
+    for w in governing_welds(package,member_sheets):
         member,design=member_sheets[(w['member_id'],w['case'])]
         at=lambda col,offset:f'{col}{row+offset}'
         ref=lambda cell:f"'{member.Name}'!{cell}"
@@ -114,21 +115,21 @@ def build_welds(wb,sheet,package,member_sheets,numeric):
             copy_rows(source,sheet,7,16,row)
             corner=design['member']['angle_deg']>0
             sheet.Range(at('B',0)).Value2=f'Connection Check: {label} ({"Corner Strut" if corner else "Strut"} - Waler)'
-            sheet.Range(at('B',1)).Value2='Design Strut Force per Width'
-            width=design['member']['load_width_m']
-            sheet.Range(at('Q',2)).Value2=width
-            sheet.Range(at('Q',2)).Formula=f"='{design['summary_sheet']}'!I{design['axial_summary_row']}"
-            sheet.Range(at('Q',2)).NumberFormat='0.00'
+            force_member,force_design=member_sheets[force_key(w)]
+            sheet.Range(at('B',1)).Value2='Waling design shear'
+            sheet.Range(at('B',2)).Value2='Design Shear From Waling'
+            sheet.Range(at('Q',2)).ClearContents()
             for col,offset in [('M',1),('M',2),('O',9)]:
                 sheet.Range(at(col,offset)).NumberFormat='0.00'
-            formulas={at('M',1):f'={ref("J11")}/{at("Q",2)}',at('M',2):f'={at("M",1)}',at('W',2):f'={at("M",2)}*{at("Q",2)}',
+            vref=f"'{force_member.Name}'!J12"
+            formulas={at('M',1):f'=IF(COUNT({vref})=1,ABS({vref}),"INPUTS REQUIRED")',at('M',2):f'={at("M",1)}',at('W',2):f'={at("M",2)}',
                       at('J',4):'='+ref('R17'),at('J',5):f'={ref("R17")}-{ref("R18")}',at('J',6):'='+ref('R20')}
             sheet.Range(at('D',3)).Value2=w['leg_mm'];sheet.Range(at('U',8)).Value2=w['strength_mpa']
             formulas[at('O',9)]=f'={at("W",2)}'
             cap_cell=at('J',9);force_cell=at('O',9);status_cell=at('AE',9)
             formulas[at('N',9)]=f'=IF({cap_cell}>={force_cell},">=","<")'
             length=2*(numeric(member,'R17')+(numeric(member,'R17')-numeric(member,'R18'))+numeric(member,'R20'))
-            demand=design['design_actions']['n'];units='kN';count=10
+            demand=abs(force_design['design_actions']['v']);units='kN';count=10
         else:
             copy_rows(source,sheet,18,23,row)
             sheet.Range(at('B',0)).Value2=f'Connection Check: {label} (Waler - Sheet Piles)'
@@ -147,6 +148,7 @@ def build_welds(wb,sheet,package,member_sheets,numeric):
         for cell,formula in formulas.items():set_formula(sheet,cell,formula)
         sheet.Calculate();cap=numeric(sheet,cap_cell)
         expected=.7*w['leg_mm']*w['strength_mpa']*length/1000
+        attach_live_selector(wb,sheet,w,member_sheets,row)
         if not math.isclose(cap,expected,rel_tol=1e-9) or not math.isclose(numeric(sheet,force_cell),demand,rel_tol=1e-9):raise ValueError('Connection check与独立算式不一致')
         results.append({'input':w,'demand':demand,'capacity':cap,'units':units,'effective_length_mm':length,'status':'PASS' if cap>=demand else 'FAIL','capacity_cell':cap_cell,'force_cell':force_cell,'status_cell':status_cell})
         row+=count+1

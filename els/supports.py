@@ -58,6 +58,7 @@ def resolve_package(package):
             force=source.get('anchor_kn') if source else None
             m['load_width_m']=spacing;m['angle_deg']=0.0
             m['anchor_kn_per_m']=abs(force)/spacing if finite(force) and finite(spacing) and spacing>0 else None
+            if m.get('lx_is_default'):m['lx_m']=m.get('load_span_m')
         if m.get('lx_equals_ly'):m['ly_m']=m.get('lx_m')
         if m.get('use_default_k'):
             m.update(kx=1.0,ky=1.0,klt=1.0)
@@ -97,7 +98,7 @@ def validate_package(package, library=None):
     from .critical_connections import validate_groups
     errors.extend(validate_groups(package))
     members = package.get('members', [])
-    if not isinstance(members, list) or not members:
+    if not isinstance(members, list) or (not members and not package.get('include_blinding')):
         return ['至少录入一个支撑或围檩工况']
     for i, m in enumerate(members, 1):
         if not isinstance(m, dict):
@@ -325,7 +326,8 @@ def populate(wb, package, actions, project, subject):
     summary_last=build_summary(wb,summary,package,member_sheets)
     page_style(summary,project,subject,summary_last,app)
     inputs.Visible=2
-    output.insert(0,summary.Name)
+    if package['members']:output.insert(0,summary.Name)
+    else:summary.Visible=2
     weld_results=[]
     bracket_results=[]
     connection_hash=None
@@ -393,8 +395,8 @@ def populate(wb, package, actions, project, subject):
     failures.extend(b['input']['bracket_id']+' bracket' for b in bracket_results if b['status']=='FAIL')
     if expected and expected['status']=='FAIL':
         failures.append('Blinding Concrete')
-    if failures:
-        raise ValueError('新增模块验算未通过：'+', '.join(failures)+'\n'+json.dumps(result,ensure_ascii=False,indent=2))
+    result['failed_checks']=failures
+    result['status']='NOT PASS' if failures else 'PASS'
     return output,result
 
 def generate_supports(package, mapping_path, output_root, project_name, subject_name, steel_request=None):
@@ -444,7 +446,7 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                         for ci,formula in enumerate(row):
                             if isinstance(formula,str) and 'CELL("FILENAME"' in formula.upper():ws.Cells(used.Row+ri,used.Column+ci).Value2=f'OUTPUT/[{target.name}]{ws.Name}'
                 for field in ('LeftHeader','RightHeader','LeftFooter','CenterFooter','RightFooter'):setattr(ws.PageSetup,field,'')
-                ws.PageSetup.CenterHeader='REVIEW DRAFT'
+                ws.PageSetup.CenterHeader='REVIEW DRAFT - NOT PASS' if checks.get('status')=='NOT PASS' else 'REVIEW DRAFT'
             app.Calculation=-4105;app.CalculateFullRebuild()
             for name in names:
                 ws=wb.Worksheets(name)
@@ -453,6 +455,8 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                 if bad is not None:raise ValueError(f'{name}打印区域存在公式错误：{bad.Address}')
             from .reference_store import detach_external_links
             detach_external_links(wb,names)
+            from .printing import format_check_results
+            for name in names:format_check_results(wb.Worksheets(name))
             wb.Save();wb.ExportAsFixedFormat(0,str(pdf.resolve()))
         result={'module':'support_structure','request':package,'project_name':project_name,'subject_name':subject_name,
                 'steel_request':steel_request if package.get('include_blinding',True) else None,

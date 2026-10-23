@@ -12,6 +12,7 @@ templates/*
 *.pdf
 TWD-TD004/
 新计算书/
+Project/
 
 # Credentials and local tooling state
 .env

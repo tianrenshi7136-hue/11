@@ -1,6 +1,16 @@
 """Shared engineering calculation print layout."""
 
 
+def format_check_results(ws):
+    """Failing result text must never retain a template's green pass fill."""
+    area=ws.Range(ws.PageSetup.PrintArea)
+    first=area.Cells(1,1).Address.replace('$','')
+    condition=area.FormatConditions.Add(2,1,f'=IFERROR(OR({first}="NOT OK",{first}="NOT PASS",{first}="FAIL",{first}="N.G."),FALSE)')
+    condition.Interior.Color=14803455
+    condition.Font.Color=128;condition.Font.Bold=True
+    condition.SetFirstPriority()
+
+
 def setup_print(ws, last_content_row, app):
     bottom = last_content_row + 2
     # AH belongs to the original tables. AI is the new outer frame column.

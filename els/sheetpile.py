@@ -99,12 +99,19 @@ def excel_session(path):
         app.AskToUpdateLinks = False
         app.Workbooks.Add()
         app.Calculation = -4135
-        wb = app.Workbooks.Open(str(Path(path).resolve()), UpdateLinks=0, ReadOnly=False, AddToMru=False)
+        try:
+            wb = app.Workbooks.Open(str(Path(path).resolve()), UpdateLinks=0, ReadOnly=False, AddToMru=False)
+        except Exception as exc:
+            raise ValueError(f'Excel 无法打开工作副本：{Path(path).resolve()}。这是文件读取失败，尚未执行验算。\n{exc}') from exc
         yield app, wb
     finally:
         try:
             if wb is not None:
-                wb.Close(SaveChanges=False)
+                try:wb.Close(SaveChanges=False)
+                except AttributeError:
+                    # A late-bound Excel wrapper can lose Close after export.
+                    # Quit below still disposes this private Excel instance.
+                    pass
         finally:
             try:
                 if app is not None:
@@ -114,6 +121,8 @@ def excel_session(path):
 
 
 def check_template(wb):
+    from .wall_compat import prepare_wall
+    prepare_wall(wb)
     sheet = wb.Worksheets('FSPiv Summary')
     for address, expected in [('AB50', STATUS_FORMULA), ('I50', '=F50*1.4'), ('T50', '=Q50*1.4')]:
         if sheet.Range(address).Formula != expected:
@@ -151,6 +160,7 @@ def calculate_candidate(wb, section, request, actions):
     # Original V35 reads L29 (fixed >1 support-layer coefficient). The selected
     # project reduction must drive this output, rather than that historic row.
     stiffness.Range('V35').Formula = '=P35*T35'
+    sheet.Calculate()
     stiffness.Calculate()
     sheet.Calculate()
     result = {'section': section}
@@ -190,11 +200,11 @@ def preselect(request, mapping_path, output_root):
     if request.get('purpose') != 'preselection' or request.get('selection_mode') != 'lightest':
         raise ValueError('截面初选须使用独立初选输入')
     actions = envelope(request)
-    from .reference_store import reference_file
-    template=reference_file(mapping_path,role='wall')
+    from .wall_compat import wall_reference
+    template=wall_reference(mapping_path)
     revision=sha256(template)
     with tempfile.TemporaryDirectory() as folder:
-        copy = Path(folder) / 'preselection.xls'
+        copy = Path(folder) / ('preselection'+template.suffix)
         shutil.copy2(template, copy)
         with excel_session(copy) as (app, wb):
             check_template(wb)
@@ -218,7 +228,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
     support_package=request.get('support_package')
     if support_package:
         from .supports import validate_package, section_library
-        errors=validate_package(support_package,section_library())
+        errors=validate_package(support_package,section_library(aa=True))
         if errors:
             raise ValueError('\n'.join(errors))
     if not isinstance(project_name, str) or not project_name.strip():
@@ -227,31 +237,37 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
         raise ValueError('Subject Name不能为空')
     if re.search(r'[\u3400-\u9fff]', project_name + subject_name):
         raise ValueError('Project Name和Subject Name请使用英文，不得含中文字符')
-    from .reference_store import reference_file,detach_external_links
-    template=reference_file(mapping_path,role='wall')
+    from .reference_store import detach_external_links
+    from .wall_compat import wall_reference
+    template=wall_reference(mapping_path)
     before = sha256(template)
     folder = Path(output_root) / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:6])
     folder.mkdir(parents=True, exist_ok=False)
     output_name='ELS_Structural_Check_Review' if support_package else 'Sheetpile_Structural_Check_Review'
-    target = folder / (output_name+'.xls')
+    target = folder / (output_name+template.suffix)
     pdf = folder / (output_name+'.pdf')
     shutil.copy2(template, target)
     candidates = []
     try:
         with excel_session(target) as (app, wb):
+            if support_package and template.suffix.lower()=='.xlsx':
+                from .connections import prepare_aa_workbook
+                prepare_aa_workbook(wb)
             check_template(wb)
             options = SECTIONS if request['selection_mode'] == 'lightest' else [request['section']]
             candidates = [calculate_candidate(wb, section, request, actions) for section in options]
             passed = [c for c in candidates if c['status'] == 'OK']
-            if not passed:
-                raise ValueError(rejection_message(candidates, request['selection_mode']))
-            selected = min(passed, key=lambda c: (c['weight_kg_per_m2'], SECTIONS.index(c['section'])))
+            selected = candidates[0]
             selected = calculate_candidate(wb, selected['section'], request, actions)
             sheet = wb.Worksheets('FSPiv Summary')
             for ws in wb.Worksheets:
                 ws.Visible = -1 if ws.Name == 'FSPiv Summary' else 2
             sheet.Range('D3').Value2 = "'" + project_name
             sheet.Range('D4').Value2 = "'" + subject_name
+            sheet.Range('Q4').NumberFormat='[$-409]dd-mmm-yy'
+            sheet.Range('Q4').ShrinkToFit=True
+            sheet.Range('Q4').Font.Size=8
+            sheet.Range('H47').Value2='Actions = 1.4 x unfactored analysis'
             for address in ('R3', 'V3', 'AB3', 'AG3', 'V4', 'AB4'):
                 sheet.Range(address).MergeArea.ClearContents()
             sheet.Range('B48').Formula = '=J8'
@@ -298,7 +314,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                                 ws.Cells(row_start+ri, col_start+ci).Value2 = f'OUTPUT/[{target.name}]{ws.Name}'
                 ws.PageSetup.LeftHeader = ''
                 ws.PageSetup.RightHeader = ''
-                ws.PageSetup.CenterHeader = 'REVIEW DRAFT'
+                ws.PageSetup.CenterHeader = 'REVIEW DRAFT - NOT PASS' if selected['status']!='OK' or (support_result and support_result.get('status')=='NOT PASS') else 'REVIEW DRAFT'
                 ws.PageSetup.LeftFooter = ''
                 ws.PageSetup.RightFooter = ''
                 ws.PageSetup.CenterFooter = ''
@@ -342,6 +358,8 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                         if str(cell.Text) in EXCEL_ERRORS:
                             raise ValueError(f'输出公式错误：{cell.Address} {cell.Text}')
             detach_external_links(wb,output_sheets)
+            from .printing import format_check_results
+            for name in output_sheets:format_check_results(wb.Worksheets(name))
             wb.Save()
             wb.ExportAsFixedFormat(0, str(pdf.resolve()))
         result = {'module': 'sheetpile_structure', 'review_status': 'REANALYSIS_REQUIRED' if selected['requires_reanalysis'] else 'ENGINEER_REVIEW_REQUIRED',
@@ -353,6 +371,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                   'workbook': str(target.resolve()), 'pdf': str(pdf.resolve()),
                   'scope': ('Continuous sheetpile, template steel members, direct concentric welds and engineer-defined blinding checks; global stability and CAD pending.' if support_result else 'Only continuous sheetpile shear and bending checks; global stability, connections and CAD pending.'),
                   'historical_sheets': 'Original unrelated worksheets retained very hidden for formula preservation; excluded from delivered PDF and assessment.'}
+        result['check_status']='NOT PASS' if selected['status']!='OK' or (support_result and support_result.get('status')=='NOT PASS') else 'PASS'
         result['controlled_formula_updates'] = {
             'Stiffness for FREW-FSPIV!V35': '=P35*T35 (project reduction replaces historic layer-table dependency)',
             'Stiffness for FREW-FSPIV!J8/J16/R35/T35': 'Linked to selected summary section/material/reductions',

@@ -94,7 +94,7 @@ def copy_source(source, destination):
                    ELS_TEMPLATE_DEST=str(Path(destination).resolve()))
         subprocess.run(['powershell.exe', '-NoProfile', '-NonInteractive', '-Command',
                         'Copy-Item -LiteralPath $env:ELS_TEMPLATE_SOURCE -Destination $env:ELS_TEMPLATE_DEST -ErrorAction Stop'],
-                       env=env, check=True, capture_output=True, text=True,
+                       env=env, check=True, capture_output=True,
                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
 
 

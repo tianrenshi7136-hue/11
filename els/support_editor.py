@@ -41,7 +41,7 @@ class SupportEditor(QWidget):
   self.case_notice=QLabel();self.case_notice.setWordWrap(True);self.case_notice.hide();layout.addWidget(self.case_notice)
   toolbar=QHBoxLayout();self.generate=QPushButton('生成计算书及 PDF');self.generate.setObjectName('Generate');self.generate.clicked.connect(lambda *_:self.generate_requested.emit());toolbar.addWidget(self.generate,1)
   refresh=QPushButton('更新参考模板…');refresh.clicked.connect(lambda *_:self.reference_requested.emit());toolbar.addWidget(refresh);layout.addLayout(toolbar)
-  self.combined=QCheckBox('生成钢板桩计算书时，同时加入本页构件验算');layout.addWidget(self.combined)
+  self.combined=QCheckBox('包含钢板桩计算书（使用钢板桩页面已输入的数据）');self.combined.setChecked(True);layout.addWidget(self.combined)
   self.tabs=QTabWidget();self.tabs.setDocumentMode(True);layout.addWidget(self.tabs,1)
   self.struts=self.member_page('Strut',STRUT_FIELDS,['编号','工况','截面（输入搜索）','钢材','墙法线力\nkN（未分项）','支撑间距\nm','角度\ndeg','Strut length\nm','Lx\nm','Ly\nm','长度联动','Kx','Ky','KLT','K 系数设置'])
   self.walers=self.member_page('Waler',WALER_FIELDS,['编号','工况','截面（输入搜索）','钢材','关联支撑','分布荷载\nkN/m（自动）','荷载宽度\nm（自动）','Span\nm','Lx\nm','Ly\nm','长度联动','Kx','Ky','KLT','K 系数设置'])
@@ -123,6 +123,9 @@ class SupportEditor(QWidget):
    for row in range(table.rowCount()):
     table.item(row,fields.index('case')).setText(case)
     if 'waler_case' in fields:table.item(row,fields.index('waler_case')).setText(case)
+    if 'waler_id' in fields:
+     combo=table.cellWidget(row,fields.index('waler_id'));parts=combo.currentText().split(' / ')
+     if len(parts)==2:combo.clear();combo.addItem(parts[0]+' / '+case)
     if 'source_strut' in fields:
      combo=table.cellWidget(row,fields.index('source_strut'));old=combo.currentText();parts=old.split(' / ')
      if len(parts)==2:combo.setProperty('restore_value',parts[0]+' / '+case);combo.setCurrentText('选择关联支撑')
@@ -148,6 +151,7 @@ class SupportEditor(QWidget):
  def add_member(self,kind,record=None):
   record=dict(record or {});table=self.struts if kind=='Strut' else self.walers;fields=STRUT_FIELDS if kind=='Strut' else WALER_FIELDS
   record.setdefault('case',self.case_name.text().strip() or 'LC1')
+  record.setdefault('lx_equals_ly',True)
   record.setdefault('use_default_k',all(record.get(k,1) in (1,1.0,'1','1.0') for k in ('kx','ky','klt')))
   if not record.get('member_id'):record['member_id']=self.next_id(kind)
   row=table.rowCount();self.busy=True;table.insertRow(row)
@@ -159,11 +163,12 @@ class SupportEditor(QWidget):
    elif key in ('lx_equals_ly','use_default_k'):
     box=QCheckBox('Lx = Ly' if key=='lx_equals_ly' else '设置默认值');box.setChecked(bool(value));box.setToolTip('勾选后 Ly 跟随 Lx，不能单独修改' if key=='lx_equals_ly' else '勾选：Kx、Ky、KLT 固定为 1；取消勾选后可自行输入');box.toggled.connect(self.emit_changed);table.setCellWidget(row,col,box)
    else:table.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
-  if kind=='Strut':table.item(row,fields.index('lx_m')).setData(Qt.ItemDataRole.UserRole,record.get('lx_is_default',record.get('lx_m') in ('',None)))
+  table.item(row,fields.index('lx_m')).setData(Qt.ItemDataRole.UserRole,record.get('lx_is_default',record.get('lx_m') in ('',None)))
   self.busy=False;self.refresh();self.changed.emit()
  def member_item_changed(self,kind,table,item):
   if self.busy:return
-  if kind=='Strut' and item.column()==STRUT_FIELDS.index('lx_m'):
+  fields=STRUT_FIELDS if kind=='Strut' else WALER_FIELDS
+  if item.column()==fields.index('lx_m'):
    item.setData(Qt.ItemDataRole.UserRole,False)
   self.emit_changed()
  def next_id(self,kind):
@@ -196,9 +201,8 @@ class SupportEditor(QWidget):
   try:
    for table,fields in ((self.struts,STRUT_FIELDS),(self.walers,WALER_FIELDS)):
     for row in range(table.rowCount()):
-     if table is self.struts:
-      lx_item=table.item(row,fields.index('lx_m'))
-      if lx_item.data(Qt.ItemDataRole.UserRole):lx_item.setText(self.text(table,row,fields.index('strut_length_m')))
+     lx_item=table.item(row,fields.index('lx_m'))
+     if lx_item.data(Qt.ItemDataRole.UserRole):lx_item.setText(self.text(table,row,fields.index('strut_length_m' if table is self.struts else 'load_span_m')))
      linked=table.cellWidget(row,fields.index('lx_equals_ly')).isChecked();lx=self.text(table,row,fields.index('lx_m'));ly=table.item(row,fields.index('ly_m'))
      if linked:ly.setText(lx)
      ly.setFlags(ly.flags() & ~Qt.ItemFlag.ItemIsEditable if linked else ly.flags() | Qt.ItemFlag.ItemIsEditable)
@@ -222,12 +226,22 @@ class SupportEditor(QWidget):
     q=abs(force)/spacing if isinstance(force,(int,float)) and isinstance(spacing,(int,float)) and spacing>0 else None
     for key,value in [('anchor_kn_per_m',q),('load_width_m',spacing)]:
      item=self.walers.item(row,WALER_FIELDS.index(key));item.setText('' if value is None else f'{value:.12g}');item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+   walers={self.text(self.walers,r,0)+' / '+self.text(self.walers,r,1) for r in range(self.walers.rowCount())}
+   for row in range(self.brackets.rowCount()):
+    combo=self.brackets.cellWidget(row,BRACKET_FIELDS.index('waler_id'));old=combo.currentText();choices=['选择已定义围檩']+sorted(walers)
+    invalid=old not in choices and old not in ('','选择已定义围檩')
+    if invalid:choices.append(old)
+    if [combo.itemText(i) for i in range(combo.count())]!=choices:combo.clear();combo.addItems(choices)
+    combo.setCurrentText(old if old in choices else choices[0])
+    if invalid:
+     combo.model().item(combo.findText(old)).setEnabled(False);combo.setToolTip('原关联已失效，请选择现有围檩。')
+    else:combo.setToolTip('选择已经定义的围檩编号及工况')
   finally:self.busy=False
  def duplicate(self,kind,count):
   table=self.struts if kind=='Strut' else self.walers;fields=STRUT_FIELDS if kind=='Strut' else WALER_FIELDS;row=table.currentRow()
   if row<0:raise ValueError('请先选中一行作为复制模板')
   record=self.read_rows(table,fields)[row]
-  if kind=='Strut':record['lx_is_default']=bool(table.item(row,fields.index('lx_m')).data(Qt.ItemDataRole.UserRole))
+  record['lx_is_default']=bool(table.item(row,fields.index('lx_m')).data(Qt.ItemDataRole.UserRole))
   welds=self.read_welds();created=[]
   for _ in range(count):
    clone=copy.deepcopy(record);clone['member_id']=self.next_id(kind);created.append(clone['member_id']);self.add_member(kind,clone)
@@ -289,6 +303,10 @@ class SupportEditor(QWidget):
   for col,key in enumerate(BRACKET_FIELDS):
    value=record.get(key,'')
    if key=='section':self.brackets.setCellWidget(row,col,self.section_combo(value))
+   elif key=='waler_id':
+    combo=QComboBox();combo.addItems(['选择已定义围檩']+[self.text(self.walers,r,0)+' / '+self.text(self.walers,r,1) for r in range(self.walers.rowCount())]);chosen=str(value)+' / '+str(record.get('waler_case','')) if value else ''
+    if chosen and combo.findText(chosen)<0:combo.addItem(chosen)
+    combo.setCurrentText(chosen or '选择已定义围檩');combo.currentTextChanged.connect(self.emit_changed);self.brackets.setCellWidget(row,col,combo)
    elif key in ('grade','load_model'):
     combo=QComboBox();combo.addItems(['请选择','S235','S275','S355','S460'] if key=='grade' else ['选择受力模型','point']);combo.setCurrentText(str(value));combo.currentTextChanged.connect(self.emit_changed);self.brackets.setCellWidget(row,col,combo)
    else:self.brackets.setItem(row,col,QTableWidgetItem('' if value is None else str(value)))
@@ -299,17 +317,19 @@ class SupportEditor(QWidget):
   self.refresh();members=[]
   for row,m in enumerate(self.read_rows(self.struts,STRUT_FIELDS)):
    m['kind']='Strut';m['lx_is_default']=bool(self.struts.item(row,STRUT_FIELDS.index('lx_m')).data(Qt.ItemDataRole.UserRole));members.append(m)
-  for m in self.read_rows(self.walers,WALER_FIELDS):
+  for row,m in enumerate(self.read_rows(self.walers,WALER_FIELDS)):
    source=m.pop('source_strut');parts=source.split(' / ');m.update(kind='Waler',angle_deg=0.0,source_strut_id=parts[0] if len(parts)==2 else '',source_strut_case=parts[1] if len(parts)==2 else '');members.append(m)
+   m['lx_is_default']=bool(self.walers.item(row,WALER_FIELDS.index('lx_m')).data(Qt.ItemDataRole.UserRole))
   try:thickness=float(self.thickness.text()) if self.thickness.text().strip() else None
   except ValueError:raise ValueError('Blinding厚度须为数字')
   brackets=self.read_rows(self.brackets,BRACKET_FIELDS)
   for b in brackets:
+   parts=b['waler_id'].split(' / ');b['waler_id']=parts[0] if len(parts)==2 else '';b['waler_case']=parts[1] if len(parts)==2 else ''
    b['eccentricity_m']=b['length_m']/2 if isinstance(b.get('length_m'),(float,int)) else None
    for key,field in self.bracket_weld_controls.items():
     try:b[key]=float(field.text()) if field.text().strip() else None
     except ValueError:raise ValueError(f'托架焊缝 {key}须为数字')
-  return dict(schema_version=2,case_name=self.case_name.text().strip(),connection_groups=self.collect_groups(),connection_template=AA_CONNECTIONS,brackets=brackets,enabled=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
+  return dict(schema_version=2,case_name=self.case_name.text().strip(),connection_groups=self.collect_groups(),connection_template=AA_CONNECTIONS,brackets=brackets,enabled=True,include_sheetpile=self.combined.isChecked(),include_blinding=self.include_blinding.isChecked(),source=self.source.text().strip(),members=members,welds=self.read_welds(),length_m=length,width_m=width,blinding_thickness_mm=thickness)
  def load(self,record):
   self.struts.setRowCount(0);self.walers.setRowCount(0);self.welds.setRowCount(0);self.brackets.setRowCount(0)
   cases=list(dict.fromkeys(m.get('case','LC1') for m in record.get('members',[])))
@@ -320,7 +340,7 @@ class SupportEditor(QWidget):
    controls['enabled'].setChecked(False)
    for key,field in controls.items():
     if isinstance(field,QLineEdit):field.clear()
-  self.combined.setChecked(bool(record.get('enabled',False)));self.source.setText(record.get('source',''));self.include_blinding.setChecked(record.get('include_blinding',record.get('blinding_thickness_mm') is not None));self.thickness.setText('' if record.get('blinding_thickness_mm') is None else str(record['blinding_thickness_mm']))
+  self.combined.setChecked(record.get('include_sheetpile',True));self.source.setText(record.get('source',''));self.include_blinding.setChecked(record.get('include_blinding',record.get('blinding_thickness_mm') is not None));self.thickness.setText('' if record.get('blinding_thickness_mm') is None else str(record['blinding_thickness_mm']))
   for m in record.get('members',[]):
    if m['kind']=='Strut':self.add_member('Strut',m)
   for m in record.get('members',[]):

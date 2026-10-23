@@ -142,7 +142,7 @@ class Workbench(QMainWindow):
         super().__init__()
         from .theme import workbench_style
         QApplication.instance().setStyleSheet(workbench_style())
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.6")
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.7")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()
@@ -258,9 +258,7 @@ class Workbench(QMainWindow):
             button = QPushButton(label)
             button.clicked.connect(action)
             sb.addWidget(button)
-        self.steel_generate = QPushButton('验算指定型号并生成计算书／PDF')
-        self.steel_generate.clicked.connect(self.generate_steel)
-        sb.addWidget(self.steel_generate)
+        sb.addWidget(QLabel('填写后，请到“围檩／支撑计算书”页面统一生成计算书及 PDF。'))
         steel_layout.addLayout(sb)
         self.steel_result = QTextEdit()
         self.steel_result.setReadOnly(True)
@@ -325,6 +323,7 @@ class Workbench(QMainWindow):
         self.blinding_thickness=self.support_editor.thickness
         self.support_result=self.support_editor.result
         self.support_generate=self.support_editor.generate
+        self.steel_generate=self.support_generate
         self.support_editor.changed.connect(self.steel_changed)
         self.support_editor.generate_requested.connect(self.generate_support_book)
         self.support_editor.reference_requested.connect(self.refresh_support_reference)
@@ -359,7 +358,7 @@ class Workbench(QMainWindow):
         p.update({k: widget.value() for k, widget in self.geometry.items()})
         p["members"] = []
         p['sheetpile'] = self.collect_steel()
-        if self.support_enabled.isChecked() or self.support_editor.struts.rowCount() or self.support_editor.walers.rowCount() or 'support_design' in p:
+        if self.support_editor.struts.rowCount() or self.support_editor.walers.rowCount() or self.support_editor.brackets.rowCount() or self.support_source.text().strip() or self.blinding_thickness.text().strip() or not self.support_enabled.isChecked() or 'support_design' in p:
             p['support_design']=self.collect_support()
         initial = self.collect_initial()
         if initial or 'sheetpile_preselection' in p:
@@ -427,8 +426,6 @@ class Workbench(QMainWindow):
         if getattr(self, 'steel_ei_origin', None) == 'section_table':
             r['analysis_ei_origin'] = 'section_table'
             r['section_table_version'] = TABLE_VERSION
-        if self.support_enabled.isChecked():
-            r['support_package']=self.collect_support()
         return r
 
     def add_support_member(self,record=None):
@@ -464,17 +461,33 @@ class Workbench(QMainWindow):
         def action():
             if (self.steel_worker and self.steel_worker.isRunning()) or (self.support_worker and self.support_worker.isRunning()):
                 raise ValueError('请等待当前Excel生成完成')
-            package=self.collect_support();package['enabled']=True
-            steel=self.collect_steel() if package.get('include_blinding') else None
-            self.support_generate.setEnabled(False);self.steel_generate.setEnabled(False)
-            self.support_result.setPlainText('正在使用Excel生成围檩／支撑及焊缝计算书…')
-            self.support_worker=SupportWorker(package,self.name.text().strip(),self.subject.text().strip(),steel)
-            self.support_worker.completed.connect(self.support_completed)
-            self.support_worker.failed.connect(lambda message:self.support_result.setPlainText('生成未完成：\n'+message))
-            self.support_worker.finished.connect(lambda:self.support_generate.setEnabled(True))
-            self.support_worker.finished.connect(lambda:self.steel_generate.setEnabled(True))
-            self.support_worker.start()
+            from .generation import generation_plan
+            steel=self.collect_steel();package=self.collect_support();plan=generation_plan(steel,package)
+            if plan['missing']:
+                answer=QMessageBox.question(self,'计算书数据未完整输入','、'.join(plan['missing'])+'计算书未输入数据，是否要继续。\n\n选择“是”：仅生成已完整输入的计算书；选择“否”：返回页面继续输入。',QMessageBox.StandardButton.Yes|QMessageBox.StandardButton.No,QMessageBox.StandardButton.No)
+                if answer!=QMessageBox.StandardButton.Yes:return
+            if not plan['steel'] and not plan['support']:raise ValueError('没有可生成的完整计算书，请补充至少一个模块的数据。')
+            self._generation_input=(steel,package,self.name.text().strip(),self.subject.text().strip())
+            if plan['steel']:
+                request=plan['steel']
+                if plan['support']:request['support_package']=plan['support']
+                worker=SheetpileWorker(request,self.name.text().strip(),self.subject.text().strip());self.steel_worker=worker
+            else:
+                worker=SupportWorker(plan['support'],self.name.text().strip(),self.subject.text().strip(),plan['blinding_steel']);self.support_worker=worker
+            self.support_generate.setEnabled(False);self.support_result.setPlainText('正在使用 Excel 生成已输入模块的计算书及 PDF…')
+            worker.completed.connect(self.generation_completed)
+            worker.failed.connect(lambda message:self.support_result.setPlainText('生成未完成：\n'+message))
+            worker.finished.connect(lambda:self.support_generate.setEnabled(True));worker.start()
         self.guarded(action)
+
+    def generation_completed(self,result):
+        try:stale=self._generation_input!=(self.collect_steel(),self.collect_support(),self.name.text().strip(),self.subject.text().strip())
+        except ValueError:stale=True
+        checks=result.get('support_package_results') or {};failed=checks.get('failed_checks',[])
+        if result.get('selected',{}).get('status') not in (None,'OK'):failed=['钢板桩']+failed
+        status='NOT PASS：'+', '.join(failed) if failed else '验算通过；待工程师复核'
+        self.support_result.setPlainText(('输入已修改，该成果已过期。\n' if stale else '')+status+f"\nExcel：{result['workbook']}\nPDF：{result['pdf']}\n工作表：{', '.join(result['output_sheets'])}")
+        self.state.setText('已生成计算书及PDF · '+status)
 
     def support_completed(self,result):
         try:
@@ -657,37 +670,10 @@ class Workbench(QMainWindow):
             self.steel_result.setPlainText('输入已修改，原生成结果已过期；请重新生成。')
 
     def generate_steel(self):
-        def action():
-            request = self.collect_steel()
-            errors = validate_request(request)
-            if errors:
-                raise ValueError('\n'.join(errors))
-            if not self.name.text().strip():
-                raise ValueError('请填写项目名称')
-            if not self.subject.text().strip() or re.search(r'[\u3400-\u9fff]', self.name.text() + self.subject.text()):
-                raise ValueError('请填写英文Project Name和Subject Name')
-            self.steel_generate.setEnabled(False)
-            self.steel_result.setPlainText('正在使用Excel重算并生成独立副本…')
-            self.steel_worker = SheetpileWorker(request, self.name.text().strip(), self.subject.text().strip())
-            self.steel_worker.completed.connect(self.steel_completed)
-            self.steel_worker.failed.connect(self.steel_failed)
-            self.steel_worker.finished.connect(lambda: self.steel_generate.setEnabled(True))
-            self.steel_worker.start()
-        self.guarded(action)
+        return self.generate_support_book()
 
-    def steel_completed(self, result):
-        try:
-            if self.collect_steel() != result['request'] or self.name.text().strip() != result['project_name'] or self.subject.text().strip() != result.get('subject_name', ''):
-                self.steel_result.setPlainText('生成期间输入已修改，该成果已过期。\n' + result['workbook'])
-                return
-        except ValueError:
-            self.steel_result.setPlainText('生成期间输入已修改，该成果已过期。')
-            return
-        s = result['selected']
-        self.steel_result.setPlainText(f"型号：{s['section']}\n剪力利用率：{s['shear_utilization']:.3f}\n弯矩利用率：{s['moment_utilization']:.3f}\n" + ('型号或刚度与分析基准不同：须重新分析。\n' if s['requires_reanalysis'] else '分析模型与计算书共用Excel生成的EI。\n') + f"Excel：{result['workbook']}\nPDF：{result['pdf']}\n本次生成范围以工作表清单为准；整体稳定及DWG生成尚未完成。")
-        extra=result.get('support_package_results')
-        if extra:
-            self.steel_result.append(f"新增工作表：{', '.join(result['output_sheets'][1:])}\n构件{len(extra['members'])}项、焊缝{len(extra['welds'])}项模板验算通过；仍须工程师复核适用条件。")
+    def steel_completed(self,result):
+        self.generation_completed(result)
 
     def steel_failed(self, message):
         self.steel_result.setPlainText('生成未完成：\n' + message)

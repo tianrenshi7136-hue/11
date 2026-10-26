@@ -4,9 +4,13 @@ import math
 
 def copy_rows(source,target,first,last,destination):
     source.Range(f'A{first}:AH{last}').Copy(target.Range(f'A{destination}'))
+    target.Rows(f'{destination}:{destination+last-first}').Hidden=False
+    heights={}
     for offset,row in enumerate(range(first,last+1)):
-        target.Rows(destination+offset).Hidden=False
-        target.Rows(destination+offset).RowHeight=source.Rows(row).RowHeight or 15
+        height=source.Rows(row).RowHeight or 15
+        heights.setdefault(height,[]).append(str(destination+offset))
+    for height,rows in heights.items():
+        target.Range(','.join(f'A{r}' for r in rows)).EntireRow.RowHeight=height
 
 
 def set_formula(ws,cell,formula):
@@ -88,10 +92,8 @@ def build_summary(wb,summary,package,member_sheets):
             summary.Range(f'M{heading+1}').Value2='Strut length (m)'
         for row,m in enumerate(struts,heading+3):action_row(m,row,False)
         last=heading+2+len(struts)
-    for row in range(12,last+1):
-        for col in ('H','I','L','K','M','O','R','U','X','AA','AC','AD'):
-            summary.Range(f'{col}{row}').NumberFormat='0.00'
-            summary.Range(f'{col}{row}').ShrinkToFit=True
+    numbers=summary.Range(','.join(f'{col}12:{col}{last}' for col in ('H','I','L','K','M','O','R','U','X','AA','AC','AD')))
+    numbers.NumberFormat='0.00';numbers.ShrinkToFit=True
     wb.Application.CalculateFullRebuild()
     for member,design in member_sheets.values():
         row=design['summary_row']

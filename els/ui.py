@@ -26,6 +26,7 @@ NUMERIC = set(FIELDS[3:10])
 class SheetpileWorker(QThread):
     completed = Signal(dict)
     failed = Signal(str)
+    progress = Signal(str)
 
     def __init__(self, request, project_name, subject_name):
         super().__init__()
@@ -34,7 +35,7 @@ class SheetpileWorker(QThread):
 
     def run(self):
         try:
-            self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name, self.subject_name))
+            self.completed.emit(generate_sheetpile(self.request, ROOT / 'templates/sheetpile-structure.local.json', ROOT / 'outputs/sheetpile', self.project_name, self.subject_name,progress=self.progress.emit))
         except Exception as exc:
             self.failed.emit(str(exc))
 
@@ -42,10 +43,11 @@ class SheetpileWorker(QThread):
 class SupportWorker(QThread):
     completed=Signal(dict)
     failed=Signal(str)
+    progress=Signal(str)
     def __init__(self,package,project_name,subject_name,steel_request=None):
         super().__init__();self.package=package;self.project_name=project_name;self.subject_name=subject_name;self.steel_request=steel_request
     def run(self):
-        try:self.completed.emit(generate_supports(self.package,ROOT/'templates/sheetpile-structure.local.json',ROOT/'outputs/supports',self.project_name,self.subject_name,self.steel_request))
+        try:self.completed.emit(generate_supports(self.package,ROOT/'templates/sheetpile-structure.local.json',ROOT/'outputs/supports',self.project_name,self.subject_name,self.steel_request,progress=self.progress.emit))
         except Exception as exc:self.failed.emit(str(exc))
 
 
@@ -142,7 +144,7 @@ class Workbench(QMainWindow):
         super().__init__()
         from .theme import workbench_style
         QApplication.instance().setStyleSheet(workbench_style())
-        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.7.1")
+        self.setWindowTitle("ELS 基坑支护模板工作台 · v0.7.2")
         self.resize(1250, 830)
         self.store = ProjectStore(database or ROOT / "data" / "projects.sqlite3")
         self.project = new_project()
@@ -475,9 +477,12 @@ class Workbench(QMainWindow):
             else:
                 worker=SupportWorker(plan['support'],self.name.text().strip(),self.subject.text().strip(),plan['blinding_steel']);self.support_worker=worker
             self.support_generate.setEnabled(False);self.support_result.setPlainText('正在使用 Excel 生成已输入模块的计算书及 PDF…')
+            self.support_editor.generation_started()
+            worker.progress.connect(self.support_editor.generation_status.setText)
             worker.completed.connect(self.generation_completed)
             worker.failed.connect(lambda message:self.support_result.setPlainText('生成未完成：\n'+message))
-            worker.finished.connect(lambda:self.support_generate.setEnabled(True));worker.start()
+            worker.finished.connect(lambda:self.support_generate.setEnabled(True))
+            worker.finished.connect(self.support_editor.generation_finished);worker.start()
         self.guarded(action)
 
     def generation_completed(self,result):
@@ -486,7 +491,9 @@ class Workbench(QMainWindow):
         checks=result.get('support_package_results') or {};failed=checks.get('failed_checks',[])
         if result.get('selected',{}).get('status') not in (None,'OK'):failed=['钢板桩']+failed
         status='NOT PASS：'+', '.join(failed) if failed else '验算通过；待工程师复核'
-        self.support_result.setPlainText(('输入已修改，该成果已过期。\n' if stale else '')+status+f"\nExcel：{result['workbook']}\nPDF：{result['pdf']}\n工作表：{', '.join(result['output_sheets'])}")
+        timing=result.get('performance',{}).get('total_seconds')
+        elapsed=f'\n生成耗时：{timing:.1f} 秒' if timing is not None else ''
+        self.support_result.setPlainText(('输入已修改，该成果已过期。\n' if stale else '')+status+elapsed+f"\nExcel：{result['workbook']}\nPDF：{result['pdf']}\n工作表：{', '.join(result['output_sheets'])}")
         self.state.setText('已生成计算书及PDF · '+status)
 
     def support_completed(self,result):

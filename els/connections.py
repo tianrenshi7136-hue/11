@@ -72,6 +72,11 @@ def aa_source(app):
 
 @contextmanager
 def controlled_source(app, source, expected):
+    from .excel_ops import pooled_source
+    book=pooled_source(source)
+    if book is not None:
+        yield book,expected
+        return
     # A local snapshot also handles Excel/OneDrive readers that deny Python's
     # default sharing mode. PowerShell Copy-Item uses Windows file sharing.
     with tempfile.TemporaryDirectory(prefix='els-aa-') as folder:

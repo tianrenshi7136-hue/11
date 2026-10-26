@@ -7,10 +7,12 @@ from els.critical_connections import attach_live_selector
 
 def main():
  import argparse
- parser=argparse.ArgumentParser();parser.add_argument('--existing',action='store_true');parser.add_argument('--validate-only',action='store_true');args=parser.parse_args()
+ parser=argparse.ArgumentParser();parser.add_argument('--existing',action='store_true');parser.add_argument('--validate-only',action='store_true');parser.add_argument('--result',type=Path);args=parser.parse_args()
  root=Path(__file__).resolve().parent.parent
  old=json.loads((root/'outputs/v07-validation/20261023-143621-4c300a/result.json').read_text(encoding='utf8'))
- if args.existing or args.validate_only:
+ if args.result:
+  r=json.loads(args.result.read_text(encoding='utf8'));args.validate_only=True
+ elif args.existing or args.validate_only:
   result_file=max((root/'outputs/waling-weld-correction').glob('*/result.json'),key=lambda p:p.stat().st_mtime)
   r=json.loads(result_file.read_text(encoding='utf8'))
  if args.existing:

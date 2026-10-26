@@ -1,4 +1,6 @@
 """Shared engineering calculation print layout."""
+from openpyxl.utils.cell import range_boundaries
+from .excel_ops import batched_print, hide_after
 
 
 def format_check_results(ws):
@@ -11,6 +13,7 @@ def format_check_results(ws):
     condition.SetFirstPriority()
 
 
+@batched_print
 def setup_print(ws, last_content_row, app):
     bottom = last_content_row + 2
     # AH belongs to the original tables. AI is the new outer frame column.
@@ -25,21 +28,21 @@ def setup_print(ws, last_content_row, app):
                       ws.Range('AD7').Borders(7).LineStyle == 1)
     table_right_edges = set()
     separator_table_edges = set()
-    for row in range(7,last_content_row+1):
-        cell = ws.Cells(row,34)
-        area = cell.MergeArea
-        if (area.Column+area.Columns.Count-1 == 34 and
-                area.Cells(1,1).Formula not in ('',None) and
-                cell.Borders(10).LineStyle == 1):
-            table_right_edges.add(area.Address)
-        if full_separator:
-            separator_cell = ws.Cells(row,29)
-            separator_area = separator_cell.MergeArea
-            if (separator_area.Columns.Count > 1 and
-                    separator_area.Column+separator_area.Columns.Count-1 == 29 and
-                    separator_area.Cells(1,1).Formula not in ('',None) and
-                    separator_cell.Borders(10).LineStyle == 1):
-                separator_table_edges.add(separator_area.Address)
+    formulas=ws.Range(f'A1:AH{last_content_row}').Formula
+    def table_edges(column,number,merged_only=False):
+        edges=set();row=7
+        while row<=last_content_row:
+            cell=ws.Range(f'{column}{row}')
+            address=cell.MergeArea.Address
+            left,top,right,bottom_row=range_boundaries(address)
+            value=formulas[top-1][left-1]
+            if (right==number and (not merged_only or right>left)
+                    and value not in ('',None) and cell.Borders(10).LineStyle==1):
+                edges.add(address)
+            row=bottom_row+1
+        return edges
+    table_right_edges=table_edges('AH',34)
+    if full_separator:separator_table_edges=table_edges('AC',29,True)
     ws.Range(f'AH1:AH{bottom}').Borders(10).LineStyle = -4142
     for address in table_right_edges:
         border = ws.Range(address).Borders(10)
@@ -76,17 +79,18 @@ def setup_print(ws, last_content_row, app):
     padding.Clear()
     ws.Rows(f'{last_content_row+1}:{bottom}').Hidden = False
     ws.Rows(f'{last_content_row+1}:{bottom}').RowHeight = 15
-    ws.Rows(f'{bottom+1}:65536').Hidden = True
-    ws.PageSetup.PrintArea = f'$A$1:$AI${bottom}'
-    ws.PageSetup.Zoom = False
-    ws.PageSetup.FitToPagesWide = 1
-    ws.PageSetup.FitToPagesTall = 1
-    ws.PageSetup.CenterHorizontally = True
-    ws.PageSetup.CenterVertically = True
+    hide_after(ws,bottom)
+    page=ws.PageSetup
+    page.PrintArea = f'$A$1:$AI${bottom}'
+    page.Zoom = False
+    page.FitToPagesWide = 1
+    page.FitToPagesTall = 1
+    page.CenterHorizontally = True
+    page.CenterVertically = True
     for margin in ('LeftMargin','RightMargin','TopMargin','BottomMargin'):
-        setattr(ws.PageSetup,margin,app.InchesToPoints(.25))
-    ws.PageSetup.HeaderMargin = app.InchesToPoints(.1)
-    ws.PageSetup.FooterMargin = app.InchesToPoints(.1)
+        setattr(page,margin,18.0)
+    page.HeaderMargin = 7.2
+    page.FooterMargin = 7.2
     for edge in (7,8,9,10):
         border=ws.Range(f'A1:AI{bottom}').Borders(edge)
         border.LineStyle,border.Weight=1,4

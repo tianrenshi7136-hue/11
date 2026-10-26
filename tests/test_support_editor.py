@@ -20,6 +20,11 @@ class EditorTests(unittest.TestCase):
   e=self.editor();combo=e.struts.cellWidget(0,STRUT_FIELDS.index('section'))
   self.assertTrue(combo.isEditable());combo.completer().setCompletionPrefix('86');self.assertEqual(combo.completer().completionCount(),1)
   events=[];e.generate_requested.connect(lambda:events.append(True));e.generate.click();self.assertEqual(events,[True])
+ def test_generation_progress_does_not_change_engineering_inputs(self):
+  e=self.editor();before=e.collect(10,5);changes=[];e.changed.connect(lambda:changes.append(True))
+  e.generation_started();self.assertFalse(e.generation_bar.isHidden())
+  e.generation_status.setText('导出 PDF…');e.generation_finished()
+  self.assertTrue(e.generation_bar.isHidden());self.assertEqual(e.collect(10,5),before);self.assertEqual(changes,[])
  def test_length_lx_ly_and_live_waler_spacing(self):
   e=self.editor();s=e.struts;col=lambda k:STRUT_FIELDS.index(k)
   self.assertEqual(s.item(0,col('lx_m')).text(),'2.5');self.assertEqual(s.item(0,col('ly_m')).text(),'2.5')

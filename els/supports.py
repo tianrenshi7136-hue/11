@@ -7,6 +7,7 @@ import copy
 
 from .core import finite
 from .templates import sha256
+from .excel_ops import batched_print, generation_run, progress, finish_headers, commit_print
 
 ROOT = Path(__file__).resolve().parent.parent
 BLINDING_FILE = ROOT / '新计算书/Structural capacity AA section.xlsx'
@@ -197,6 +198,7 @@ def numeric(ws, address):
     return float(value)
 
 
+@batched_print
 def page_style(ws, project, subject, last_row, app):
     ws.Visible = -1
     ws.Range('D3').Value2 = "'" + project
@@ -224,21 +226,24 @@ def page_style(ws, project, subject, last_row, app):
 
 
 def report_row(ws, row, values, ranges, header=False):
+    numeric_ranges=[]
     for value, (left, right) in zip(values, ranges):
         cells=ws.Range(f'{left}{row}:{right}{row}')
         cells.Merge()
         cells.Value2=value
-        cells.WrapText=True
-        cells.Font.Size=9
-        cells.Font.Bold=header
-        cells.Borders.LineStyle=1
         if finite(value):
-            cells.NumberFormat='0.000'
-        cells.VerticalAlignment=-4108
+            numeric_ranges.append(f'{left}{row}:{right}{row}')
+    area=ws.Range(','.join(f'{left}{row}:{right}{row}' for left,right in ranges))
+    area.WrapText=True
+    font=area.Font;font.Size=9;font.Bold=header
+    area.Borders.LineStyle=1
+    area.VerticalAlignment=-4108
+    if numeric_ranges:ws.Range(','.join(numeric_ranges)).NumberFormat='0.000'
     ws.Rows(f'{row}:{row}').RowHeight=32
 
 
 def populate(wb, package, actions, project, subject):
+    progress('members','生成支撑、围檩及构件验算…')
     package=resolve_package(package)
     from .connections import AA_CONNECTIONS
     errors = validate_package(package, section_library(aa=package.get('connection_template')==AA_CONNECTIONS))
@@ -280,12 +285,8 @@ def populate(wb, package, actions, project, subject):
         ws = copy_sheet(source)
         ws.Name = f"{'S' if m['kind']=='Strut' else 'W'}-{m['member_id']}-{m['case']}"
         # Resolve table lookups inside this workbook rather than copied external names.
-        used = ws.UsedRange
-        rows, start_row, start_col = used.Formula, used.Row, used.Column
-        for ri, row in enumerate(rows):
-            for ci, formula in enumerate(row):
-                if isinstance(formula, str) and formula.startswith('=') and ',Table,' in formula:
-                    ws.Cells(start_row+ri, start_col+ci).Formula = formula.replace(',Table,', ",'Section Table UC'!$A$5:$X$128,")
+        ws.Cells.Replace(What=',Table,',Replacement=",'Section Table UC'!$A$5:$X$128,",
+                         LookAt=2,SearchOrder=1,MatchCase=False,SearchFormat=False,ReplaceFormat=False)
         ref=lambda col: f"'Member Data'!{col}{index}"
         ws.Range('P11').Formula = '='+ref('G')
         ws.Range('Y11').Formula = '='+ref('K')
@@ -326,6 +327,7 @@ def populate(wb, package, actions, project, subject):
         page_style(ws,project,subject,51,app)
         output.append(ws.Name)
     from .support_layout import build_summary, build_welds
+    progress('member_summary','生成构件总体验算表…')
     summary_last=build_summary(wb,summary,package,member_sheets)
     page_style(summary,project,subject,summary_last,app)
     inputs.Visible=2
@@ -335,6 +337,7 @@ def populate(wb, package, actions, project, subject):
     bracket_results=[]
     connection_hash=None
     if package.get('welds') or package.get('brackets'):
+        progress('connections','生成控制连接及托架验算…')
         weld_sheet=copy_sheet('Connection check')
         weld_sheet.Name='Connection Checks'
         from .connections import AA_CONNECTIONS, build_aa_connections
@@ -352,6 +355,7 @@ def populate(wb, package, actions, project, subject):
     expected=None
     source_hash=None
     if include_blinding:
+        progress('blinding','生成 Blinding concrete 验算…')
         # Copy only the engineer-selected Blinding worksheet from the separate source.
         from .connections import controlled_source
         with controlled_source(app,blinding_file,sha256(blinding_file)) as (other,source_hash):
@@ -402,7 +406,12 @@ def populate(wb, package, actions, project, subject):
     result['status']='NOT PASS' if failures else 'PASS'
     return output,result
 
-def generate_supports(package, mapping_path, output_root, project_name, subject_name, steel_request=None):
+def generate_supports(package, mapping_path, output_root, project_name, subject_name, steel_request=None, progress=None):
+    with generation_run(progress) as run:
+        return run.finish(_generate_supports(package,mapping_path,output_root,project_name,subject_name,steel_request))
+
+
+def _generate_supports(package, mapping_path, output_root, project_name, subject_name, steel_request=None):
     """Generate member/connection checks without requiring a sheetpile design."""
     import hashlib
     import shutil
@@ -431,7 +440,8 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
         if aa:copy_source(source,target)
         else:shutil.copy2(source,target)
         before=sha256(target)
-        with excel_session(target) as (app,wb):
+        with excel_session(target,defer_print=True) as (app,wb):
+            progress('prepare_template','准备计算书模板及截面库…')
             if aa:prepare_aa_workbook(wb)
             else:check_template(wb)
             main=wb.Worksheets('FSPiv Summary');main.Visible=-1
@@ -442,14 +452,10 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
             main.Visible=2
             for name in reversed(names):
                 if wb.Worksheets(1).Name!=name:wb.Worksheets(name).Move(wb.Worksheets(1))
-            for ws in wb.Worksheets:
-                used=ws.UsedRange;formulas=used.Formula
-                if isinstance(formulas,tuple):
-                    for ri,row in enumerate(formulas):
-                        for ci,formula in enumerate(row):
-                            if isinstance(formula,str) and 'CELL("FILENAME"' in formula.upper():ws.Cells(used.Row+ri,used.Column+ci).Value2=f'OUTPUT/[{target.name}]{ws.Name}'
-                for field in ('LeftHeader','RightHeader','LeftFooter','CenterFooter','RightFooter'):setattr(ws.PageSetup,field,'')
-                ws.PageSetup.CenterHeader='REVIEW DRAFT - NOT PASS' if checks.get('status')=='NOT PASS' else 'REVIEW DRAFT'
+            progress('finish_layout','整理页眉及打印设置…')
+            finish_headers(wb,target.name,checks.get('status')=='NOT PASS')
+            commit_print(app)
+            progress('verify_formulas','重算并检查输出公式…')
             app.Calculation=-4105;app.CalculateFullRebuild()
             for name in names:
                 ws=wb.Worksheets(name)
@@ -457,6 +463,7 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                 except Exception:bad=None
                 if bad is not None:raise ValueError(f'{name}打印区域存在公式错误：{bad.Address}')
             from .reference_store import detach_external_links
+            progress('verify_links','检查并清除外部链接，核对计算结果…')
             detach_external_links(wb,names)
             from .printing import format_check_results
             for name in names:format_check_results(wb.Worksheets(name))
@@ -467,7 +474,7 @@ def generate_supports(package, mapping_path, output_root, project_name, subject_
                 'template_sha256':before,'output_sheets':names,'support_package_results':checks,
                 'review_status':'ENGINEER_REVIEW_REQUIRED','workbook':str(target.resolve()),'pdf':str(pdf.resolve()),
                 'input_sha256':hashlib.sha256(json.dumps({'package':package,'project_name':project_name,'subject_name':subject_name,'blinding_shear':actions['v']},sort_keys=True,ensure_ascii=False,allow_nan=False).encode('utf8')).hexdigest()}
-        (folder/'result.json').write_text(json.dumps(result,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf8');return result
+        return result
     except Exception as exc:
         for file in (target,pdf):file.unlink(missing_ok=True)
         (folder/'failure.json').write_text(json.dumps({'error':str(exc),'request':package},ensure_ascii=False,indent=2),encoding='utf8');raise

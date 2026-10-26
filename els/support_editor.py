@@ -4,7 +4,7 @@ import re
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QWidget,QVBoxLayout,QHBoxLayout,QLabel,QLineEdit,QCheckBox,
  QTableWidget,QTableWidgetItem,QComboBox,QCompleter,QHeaderView,QPushButton,QTabWidget,
- QFormLayout,QTextEdit,QInputDialog,QMessageBox,QGroupBox,QScrollArea,QStyledItemDelegate,QAbstractItemView,QApplication)
+ QFormLayout,QTextEdit,QInputDialog,QMessageBox,QGroupBox,QScrollArea,QStyledItemDelegate,QAbstractItemView,QApplication,QProgressBar)
 from .connections import AA_CONNECTIONS, BRACKET_FIELDS
 
 STRUT_FIELDS=('member_id','case','section','grade','anchor_kn','spacing_m','angle_deg','strut_length_m','lx_m','ly_m','lx_equals_ly','kx','ky','klt','use_default_k')
@@ -41,6 +41,8 @@ class SupportEditor(QWidget):
   self.case_notice=QLabel();self.case_notice.setWordWrap(True);self.case_notice.hide();layout.addWidget(self.case_notice)
   toolbar=QHBoxLayout();self.generate=QPushButton('生成计算书及 PDF');self.generate.setObjectName('Generate');self.generate.clicked.connect(lambda *_:self.generate_requested.emit());toolbar.addWidget(self.generate,1)
   refresh=QPushButton('更新参考模板…');refresh.clicked.connect(lambda *_:self.reference_requested.emit());toolbar.addWidget(refresh);layout.addLayout(toolbar)
+  self.generation_status=QLabel();self.generation_status.setWordWrap(True);self.generation_status.hide();layout.addWidget(self.generation_status)
+  self.generation_bar=QProgressBar();self.generation_bar.setRange(0,0);self.generation_bar.setTextVisible(False);self.generation_bar.setMaximumHeight(6);self.generation_bar.hide();layout.addWidget(self.generation_bar)
   self.combined=QCheckBox('包含钢板桩计算书（使用钢板桩页面已输入的数据）');self.combined.setChecked(True);layout.addWidget(self.combined)
   self.tabs=QTabWidget();self.tabs.setDocumentMode(True);layout.addWidget(self.tabs,1)
   self.struts=self.member_page('Strut',STRUT_FIELDS,['编号','工况','截面（输入搜索）','钢材','墙法线力\nkN（未分项）','支撑间距\nm','角度\ndeg','Strut length\nm','Lx\nm','Ly\nm','长度联动','Kx','Ky','KLT','K 系数设置'])
@@ -83,6 +85,10 @@ class SupportEditor(QWidget):
   self.combined.toggled.connect(lambda *_:self.changed.emit());self.include_blinding.toggled.connect(lambda *_:self.changed.emit())
   self.update_connection_controls()
   self.apply_editor_style()
+ def generation_started(self):
+  self.generation_status.setText('准备生成计算书…');self.generation_status.show();self.generation_bar.show()
+ def generation_finished(self):
+  self.generation_status.hide();self.generation_bar.hide()
  def apply_editor_style(self):
   from .theme import workbench_style
   self.setStyleSheet(workbench_style())

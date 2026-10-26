@@ -1,5 +1,5 @@
 """Continuous sheetpile checks using the engineer's existing Excel formulas."""
-from contextlib import contextmanager
+from contextlib import contextmanager,nullcontext
 from datetime import datetime
 import json
 import hashlib
@@ -13,6 +13,7 @@ import re
 from .core import finite
 from .templates import sha256
 from .sections import SECTIONS, ROWS, TABLE_VERSION, properties
+from .excel_ops import generation_run, progress, reference_pool, hide_after, finish_headers, print_batch, commit_print
 
 STATUS_FORMULA = '=IF(AND(X50>T50,M50>I50),"OK","NOT OK")'
 EXCEL_ERRORS = {'#REF!', '#DIV/0!', '#VALUE!', '#N/A', '#NAME?', '#NUM!', '#NULL!', '#SPILL!', '#CALC!', '#GETTING_DATA'}
@@ -29,8 +30,10 @@ def excel_call(action):
 
 
 def save_and_export(wb,pdf):
+    progress('save_excel','保存 Excel 计算书…')
     excel_call(wb.__dict__.get('_els_save',lambda:wb.Save()))
     export=wb.__dict__.get('_els_export')
+    progress('export_pdf','导出 PDF…')
     excel_call(lambda:export(0,str(pdf)) if export else wb.ExportAsFixedFormat(0,str(pdf)))
 
 
@@ -100,7 +103,7 @@ def rejection_message(candidates, mode):
 
 
 @contextmanager
-def excel_session(path):
+def excel_session(path,defer_print=False):
     import pythoncom
     import win32com.client
     pythoncom.CoInitialize()
@@ -109,11 +112,18 @@ def excel_session(path):
     close_book = None
     quit_app = None
     try:
+        progress('open_excel','启动 Excel 并打开工作副本…')
         app = win32com.client.DispatchEx('Excel.Application')
+        # Reuse the installed Excel type library instead of rediscovering COM
+        # property signatures thousands of times. This caches interface code,
+        # never engineering inputs, templates, workbooks or calculation results.
+        try:app=win32com.client.gencache.EnsureDispatch(app)
+        except (TypeError,ImportError,AttributeError,OSError):pass
         quit_app = app.Quit
         app.Visible = False
         app.DisplayAlerts = False
         app.EnableEvents = False
+        app.ScreenUpdating = False
         app.AutomationSecurity = 3
         app.AskToUpdateLinks = False
         app.Workbooks.Add()
@@ -127,8 +137,10 @@ def excel_session(path):
             wb.__dict__['_els_export']=wb.ExportAsFixedFormat
         except Exception as exc:
             raise ValueError(f'Excel 无法打开工作副本：{Path(path).resolve()}。这是文件读取失败，尚未执行验算。\n{exc}') from exc
-        yield app, wb
+        with reference_pool(app), (print_batch(app) if defer_print else nullcontext()):
+            yield app, wb
     finally:
+        progress('close_excel','关闭本次生成使用的 Excel…')
         try:
             if close_book is not None:
                 excel_call(lambda:close_book(SaveChanges=False))
@@ -241,7 +253,12 @@ def preselect(request, mapping_path, output_root):
     return result
 
 
-def generate(request, mapping_path, output_root, project_name, subject_name='Continuous Sheet Pile Wall Structural Check'):
+def generate(request, mapping_path, output_root, project_name, subject_name='Continuous Sheet Pile Wall Structural Check', progress=None):
+    with generation_run(progress) as run:
+        return run.finish(_generate(request,mapping_path,output_root,project_name,subject_name))
+
+
+def _generate(request, mapping_path, output_root, project_name, subject_name):
     if request.get('selection_mode') != 'manual' or request.get('purpose') == 'preselection':
         raise ValueError('计算书生成只验证指定型号；请在独立截面初选页面比较候选')
     actions = envelope(request)
@@ -269,16 +286,17 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
     shutil.copy2(template, target)
     candidates = []
     try:
-        with excel_session(target) as (app, wb):
+        with excel_session(target,defer_print=True) as (app, wb):
+            progress('prepare_template','准备计算书模板及截面库…')
             if support_package and template.suffix.lower()=='.xlsx':
                 from .connections import prepare_aa_workbook
                 prepare_aa_workbook(wb)
             check_template(wb)
+            progress('sheetpile','计算钢板桩截面及校验结果…')
             options = SECTIONS if request['selection_mode'] == 'lightest' else [request['section']]
             candidates = [calculate_candidate(wb, section, request, actions) for section in options]
             passed = [c for c in candidates if c['status'] == 'OK']
             selected = candidates[0]
-            selected = calculate_candidate(wb, selected['section'], request, actions)
             sheet = wb.Worksheets('FSPiv Summary')
             for ws in wb.Worksheets:
                 ws.Visible = -1 if ws.Name == 'FSPiv Summary' else 2
@@ -305,7 +323,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                                      ('R35', "='FSPiv Summary'!Q44"), ('T35', "='FSPiv Summary'!T33")]:
                 stiffness.Range(address).Formula = formula
             # Exclude historic lagging cases and the section table from output.
-            sheet.Rows('51:65536').Hidden = True
+            hide_after(sheet,50)
             sheet.Rows('24:29').Hidden = True
             sheet.Rows('34:34').Hidden = True
             for address in ('F50', 'Q50', 'I50', 'T50', 'M50', 'X50'):
@@ -323,21 +341,8 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                     wb.Worksheets(sheet_name).Move(wb.Worksheets(1))
             # English-only workbook metadata, including hidden historic sheets.
             # CELL(filename) otherwise introduces Chinese directory/file names.
-            for ws in wb.Worksheets:
-                used = ws.UsedRange
-                formulas = used.Formula
-                row_start, col_start = used.Row, used.Column
-                if isinstance(formulas, tuple):
-                    for ri, row_values in enumerate(formulas):
-                        for ci, formula in enumerate(row_values):
-                            if isinstance(formula, str) and 'CELL("FILENAME"' in formula.upper():
-                                ws.Cells(row_start+ri, col_start+ci).Value2 = f'OUTPUT/[{target.name}]{ws.Name}'
-                ws.PageSetup.LeftHeader = ''
-                ws.PageSetup.RightHeader = ''
-                ws.PageSetup.CenterHeader = 'REVIEW DRAFT - NOT PASS' if selected['status']!='OK' or (support_result and support_result.get('status')=='NOT PASS') else 'REVIEW DRAFT'
-                ws.PageSetup.LeftFooter = ''
-                ws.PageSetup.RightFooter = ''
-                ws.PageSetup.CenterFooter = ''
+            progress('finish_layout','整理页眉、打印范围及边框…')
+            finish_headers(wb,target.name,selected['status']!='OK' or (support_result and support_result.get('status')=='NOT PASS'))
             # Replace the bilingual header picture; retain the FSP section sketch.
             for index in range(sheet.Shapes.Count, 0, -1):
                 shape = sheet.Shapes.Item(index)
@@ -352,6 +357,8 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
             header.HorizontalAlignment = -4108
             from .printing import setup_print
             setup_print(sheet,50,app)
+            commit_print(app)
+            progress('verify_formulas','重算并检查输出公式…')
             app.Calculation = -4105
             stiffness.Calculate()
             sheet.Calculate()
@@ -377,6 +384,7 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
                         cell = sheet.Cells(row, col)
                         if str(cell.Text) in EXCEL_ERRORS:
                             raise ValueError(f'输出公式错误：{cell.Address} {cell.Text}')
+            progress('verify_links','检查并清除外部链接，核对计算结果…')
             detach_external_links(wb,output_sheets)
             from .printing import format_check_results
             for name in output_sheets:format_check_results(wb.Worksheets(name))
@@ -396,7 +404,6 @@ def generate(request, mapping_path, output_root, project_name, subject_name='Con
             'Stiffness for FREW-FSPIV!J8/J16/R35/T35': 'Linked to selected summary section/material/reductions',
             'FSPiv Summary!H40/H44/R33': 'Linked to project yield strength and bending reduction',
         }
-        (folder / 'result.json').write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False), encoding='utf-8')
         return result
     except Exception as exc:
         # Remove only newly-created output files; leave original and old results.
